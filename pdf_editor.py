@@ -7,19 +7,116 @@
 import re
 import sys
 import ctypes
+import ctypes.wintypes
 from functools import cache
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import Qt, QByteArray, QRectF, QPointF, QSettings, QSize, QTimer
+from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRectF, QPointF, QSettings, QSize, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
-                           QPainter, QPalette, QPen, QPixmap, QTextCursor, QUndoCommand, QUndoStack)
+                           QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QTextCursor,
+                           QUndoCommand, QUndoStack)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
                                QTextEdit, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 HIDDEN = pymupdf.PDF_ANNOT_IS_HIDDEN
+ERASER_RADIUS_PX = 8
+
+
+def point_segment_distance_sq(point, start, end):
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if not length_sq:
+        return (point[0] - start[0]) ** 2 + (point[1] - start[1]) ** 2
+    fraction = max(0, min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq))
+    return (point[0] - start[0] - fraction * dx) ** 2 + (point[1] - start[1] - fraction * dy) ** 2
+
+
+def segments_distance_sq(a, b, c, d):
+    def cross(u, v, w):
+        return (v[0] - u[0]) * (w[1] - u[1]) - (v[1] - u[1]) * (w[0] - u[0])
+
+    ab_c, ab_d = cross(a, b, c), cross(a, b, d)
+    cd_a, cd_b = cross(c, d, a), cross(c, d, b)
+    if (ab_c * ab_d <= 0 and cd_a * cd_b <= 0
+            and max(min(a[0], b[0]), min(c[0], d[0])) <= min(max(a[0], b[0]), max(c[0], d[0]))
+            and max(min(a[1], b[1]), min(c[1], d[1])) <= min(max(a[1], b[1]), max(c[1], d[1]))):
+        return 0
+    return min(point_segment_distance_sq(a, c, d), point_segment_distance_sq(b, c, d),
+               point_segment_distance_sq(c, a, b), point_segment_distance_sq(d, a, b))
+
+
+def ink_near_path(annot, start, end, radius):
+    width = annot.border.get("width", 1) or 1
+    reach = radius + width / 2
+    if not annot.rect.intersects(pymupdf.Rect(min(start[0], end[0]) - reach,
+                                               min(start[1], end[1]) - reach,
+                                               max(start[0], end[0]) + reach,
+                                               max(start[1], end[1]) + reach)):
+        return False
+    for stroke in annot.vertices or []:
+        for first, second in zip(stroke, stroke[1:]):
+            if segments_distance_sq(start, end, first, second) <= reach * reach:
+                return True
+        if len(stroke) == 1 and point_segment_distance_sq(stroke[0], start, end) <= reach * reach:
+            return True
+    return False
+
+
+class PointerInfo(ctypes.Structure):
+    _fields_ = [("pointerType", ctypes.c_uint32), ("pointerId", ctypes.c_uint32),
+                ("frameId", ctypes.c_uint32), ("pointerFlags", ctypes.c_uint32),
+                ("sourceDevice", ctypes.c_void_p), ("hwndTarget", ctypes.c_void_p),
+                ("ptPixelLocation", ctypes.wintypes.POINT),
+                ("ptHimetricLocation", ctypes.wintypes.POINT),
+                ("ptPixelLocationRaw", ctypes.wintypes.POINT),
+                ("ptHimetricLocationRaw", ctypes.wintypes.POINT),
+                ("dwTime", ctypes.c_uint32), ("historyCount", ctypes.c_uint32),
+                ("InputData", ctypes.c_int32), ("dwKeyStates", ctypes.c_uint32),
+                ("PerformanceCount", ctypes.c_uint64), ("ButtonChangeType", ctypes.c_uint32)]
+
+
+class PointerPenInfo(ctypes.Structure):
+    _fields_ = [("pointerInfo", PointerInfo), ("penFlags", ctypes.c_uint32),
+                ("penMask", ctypes.c_uint32), ("pressure", ctypes.c_uint32),
+                ("rotation", ctypes.c_uint32), ("tiltX", ctypes.c_int32),
+                ("tiltY", ctypes.c_int32)]
+
+
+class PenButtonState(QAbstractNativeEventFilter):
+    """Keep the Windows pen flags that Qt omits from its tablet button state."""
+
+    def __init__(self, on_change=None):
+        super().__init__()
+        self.pointer_id = None
+        self.eraser = False
+        self.on_change = on_change
+        self.get_pen_info = ctypes.windll.user32.GetPointerPenInfo
+        self.get_pen_info.argtypes = [ctypes.c_uint32, ctypes.POINTER(PointerPenInfo)]
+        self.get_pen_info.restype = ctypes.wintypes.BOOL
+
+    def nativeEventFilter(self, event_type, message):
+        if event_type != b"windows_generic_MSG":
+            return False
+        msg = ctypes.wintypes.MSG.from_address(int(message))
+        if msg.message not in (0x0245, 0x0246, 0x0247, 0x024A):
+            return False
+        pointer_id = msg.wParam & 0xFFFF
+        pen = PointerPenInfo()
+        old_eraser = self.eraser
+        if self.get_pen_info(pointer_id, ctypes.byref(pen)):
+            self.pointer_id = pointer_id
+            # This Galaxy Book reports the held S Pen button as PEN_FLAG_ERASER
+            # (0x4), while Qt reports only the normal left button.
+            self.eraser = bool(pen.penFlags & (0x1 | 0x4))
+        if msg.message in (0x0247, 0x024A) and pointer_id == self.pointer_id:
+            self.pointer_id = None
+            self.eraser = False
+        if self.eraser != old_eraser and self.on_change:
+            self.on_change()
+        return False
 FONT_SIZE = 20
 DEFAULT_COLORS = {"pen": "#426eff", "hl": "#fdff95", "text": "#2864c6"}
 PRESETS = {"pen": ["#426eff", "#ff4d4f", "#222222", "#12b886"],
@@ -342,6 +439,74 @@ class InlineEditor(QTextEdit):
             super().keyPressEvent(e)
 
 
+# ---------- 배경 터치 이동 ----------
+
+class BackgroundPan(QObject):
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.canvas = None
+        self.target = None
+        self.touch_id = None
+        self.last_pos = None
+
+    def set_canvas(self, canvas):
+        self.target = self.touch_id = self.last_pos = None
+        self.canvas = canvas
+        canvas.setAttribute(Qt.WA_AcceptTouchEvents)
+        canvas.installEventFilter(self)
+
+    def on_page(self, global_pos):
+        if self.canvas is None:
+            return False
+        child = self.canvas.childAt(self.canvas.mapFromGlobal(global_pos.toPoint()))
+        while child is not None and child is not self.canvas:
+            if isinstance(child, PageWidget):
+                return True
+            child = child.parentWidget()
+        return False
+
+    def eventFilter(self, obj, e):
+        kind = e.type()
+        if kind not in (QEvent.TouchBegin, QEvent.TouchUpdate, QEvent.TouchEnd, QEvent.TouchCancel):
+            return False
+        if kind == QEvent.TouchBegin:
+            device = e.device()
+            if self.touch_id is not None or device is None or device.type() != QInputDevice.DeviceType.TouchScreen:
+                return False
+            points = e.points()
+            if not points or self.on_page(points[0].globalPosition()):
+                e.ignore()
+                return False
+            self.target = obj
+            self.touch_id = points[0].id()
+            self.last_pos = points[0].globalPosition()
+            e.accept()
+            return True
+        if self.touch_id is None or obj is not self.target:
+            e.ignore()
+            return False
+        if kind == QEvent.TouchCancel:
+            self.target = self.touch_id = self.last_pos = None
+            e.accept()
+            return True
+        point = next((p for p in e.points() if p.id() == self.touch_id), None)
+        if kind == QEvent.TouchUpdate and point is not None:
+            pos = point.globalPosition()
+            delta = pos - self.last_pos
+            hbar, vbar = self.win.scroll.horizontalScrollBar(), self.win.scroll.verticalScrollBar()
+            hbar.setValue(hbar.value() - round(delta.x()))
+            vbar.setValue(vbar.value() - round(delta.y()))
+            self.last_pos = pos
+        if kind == QEvent.TouchEnd:
+            self.target = self.touch_id = self.last_pos = None
+        elif point is None and e.points():
+            self.touch_id = e.points()[0].id()
+            self.last_pos = e.points()[0].globalPosition()
+        e.accept()
+        return True
+
+
 # ---------- 페이지 위젯 ----------
 
 class PageWidget(QWidget):
@@ -355,6 +520,9 @@ class PageWidget(QWidget):
         self.preview = []    # 형광펜 미리보기 quads
         self.moving = None   # 텍스트 드래그 이동 [xref, 시작, 원래 rect, 현재]
         self.erased = None   # 지우개 드래그 중 숨긴 xref 목록
+        self.erase_previous = None
+        self.erase_excluded = set()
+        self.pen_input = None  # 펜촉이 닿아 있는 동안의 실제 동작: pen / erase
         self.tool_cursor = Qt.ArrowCursor
         self.tip_xref = None
         self.setMouseTracking(True)
@@ -438,8 +606,83 @@ class PageWidget(QWidget):
             for q in self.preview:
                 p.drawRect(self.to_widget(q.rect))
 
-    # --- 마우스 ---
+    # --- 펜 / 마우스 ---
+    def update_pen_input(self, pos, mode):
+        if mode != self.pen_input:
+            previous_mode = self.pen_input
+            if self.pen_input is not None:
+                self.move_pen_input(pos)
+                last_ink = self.finish_pen_input()
+            else:
+                last_ink = None
+            self.pen_input = mode
+            if mode == "pen":
+                self.pts = [pos]
+            elif mode == "erase":
+                self.erased = []
+                self.erase_previous = None
+                self.erase_excluded = {last_ink} if previous_mode == "pen" and last_ink is not None else set()
+                self.erase_at(self.to_pdf(pos))
+            self.setCursor(Qt.PointingHandCursor if mode == "erase" else self.tool_cursor)
+        elif mode is not None:
+            self.move_pen_input(pos)
+
+    def move_pen_input(self, pos):
+        if self.pen_input == "pen" and self.pts and pos != self.pts[-1]:
+            self.pts.append(pos)
+            self.update()
+        elif self.pen_input == "erase" and self.erased is not None:
+            self.erase_at(self.to_pdf(pos))
+
+    def finish_pen_input(self):
+        last_ink = None
+        if self.pen_input == "pen":
+            last_ink = self.finish_ink()
+        elif self.pen_input == "erase":
+            self.finish_erase()
+        self.pen_input = None
+        return last_ink
+
+    def tabletEvent(self, e):
+        buttons = e.buttons()
+        tip_down = bool(buttons & Qt.LeftButton) or e.pressure() > 0
+        self.win.set_qt_pen_eraser(tip_down and e.pointerType() == QPointingDevice.PointerType.Eraser)
+        if self.win.temporary_eraser or self.win.tool == "erase":
+            mode = "erase" if tip_down else None
+        elif self.win.tool == "pen":
+            mode = ("erase" if buttons & Qt.RightButton else "pen") if tip_down else None
+        else:
+            if self.pen_input is not None:
+                self.update_pen_input(e.position(), None)
+                e.accept()
+            else:
+                e.ignore()
+            return
+        self.update_pen_input(e.position(), mode)
+        if mode is None:
+            self.hover_at(e.position(), e.globalPosition())
+        e.accept()  # 처리한 펜 이벤트가 다시 마우스 이벤트로 전달되지 않게 함
+
+    def mouse_input_mode(self, e):
+        buttons = e.buttons()
+        if self.win.temporary_eraser and buttons & (Qt.LeftButton | Qt.RightButton):
+            return "erase"
+        if self.win.tool == "erase" and buttons & Qt.LeftButton:
+            return "erase"
+        if self.win.tool != "pen":
+            return None
+        if buttons & Qt.RightButton:
+            return "erase"
+        if buttons & Qt.LeftButton:
+            return "pen"
+        return None
+
     def mousePressEvent(self, e):
+        mode = self.mouse_input_mode(e)
+        if mode is not None and e.button() in (Qt.LeftButton, Qt.RightButton):
+            self.update_pen_input(e.position(), mode)
+            e.accept()
+            return
         if e.button() != Qt.LeftButton:
             return
         t, pt = self.win.tool, self.to_pdf(e.position())
@@ -449,9 +692,7 @@ class PageWidget(QWidget):
             return
         if a and t is None and a.info["content"]:
             return self.start_note(pt, a.xref)
-        if t == "pen":
-            self.pts = [e.position()]
-        elif t == "hl":
+        if t == "hl":
             self.drag = [e.position(), e.position()]
         elif t == "text":
             self.start_text(pt)
@@ -459,20 +700,37 @@ class PageWidget(QWidget):
             self.start_note(pt)
         elif t == "erase":
             self.erased = []
+            self.erase_previous = None
+            self.erase_excluded = set()
             self.erase_at(pt)
 
     def erase_at(self, pt):
-        a = self.annot_at(pt)
-        if a is not None:
-            self.erased.append(a.xref)
-            set_hidden(self._page, a.xref, True)   # 즉시 숨김, 커맨드는 릴리즈 때 한 번에
+        start = self.erase_previous or pt
+        self.erase_previous = pt
+        self._page = self.page
+        radius = ERASER_RADIUS_PX / self.zoom
+        start_xy, end_xy = (start.x, start.y), (pt.x, pt.y)
+        hits = [a.xref for a in self._page.annots()
+                if not a.flags & HIDDEN and a.xref not in self.erase_excluded
+                and a.type[0] == pymupdf.PDF_ANNOT_INK
+                and ink_near_path(a, start_xy, end_xy, radius)]
+        if not hits:
+            a = self.annot_at(pt)  # 다른 주석 종류는 기존의 정확한 영역 판정을 유지
+            if a is not None and a.xref not in self.erase_excluded:
+                hits = [a.xref]
+        for xref in hits:
+            if xref not in self.erased:
+                self.erased.append(xref)
+                set_hidden(self._page, xref, True)   # 즉시 숨김, 커맨드는 릴리즈 때 한 번에
+        if hits:
             self.invalidate(thumb=False)
 
     def mouseMoveEvent(self, e):
-        if self.pts:
-            self.pts.append(e.position())
-            self.update()
-        elif self.erased is not None:
+        mode = self.mouse_input_mode(e)
+        if self.pen_input is not None or mode is not None:
+            self.update_pen_input(e.position(), mode)
+            return
+        if self.erased is not None:
             self.erase_at(self.to_pdf(e.position()))
         elif self.drag:
             self.drag[1] = e.position()
@@ -482,24 +740,55 @@ class PageWidget(QWidget):
             self.moving[3] = e.position()
             self.update()
         else:
-            a = self.annot_at(self.to_pdf(e.position()))
-            is_text = a is not None and a.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and self.win.tool in (None, "text")
-            self.setCursor(Qt.SizeAllCursor if is_text else self.tool_cursor)
-            content = a.info["content"] if a and a.type[0] != pymupdf.PDF_ANNOT_FREE_TEXT else ""
-            if content:
-                if a.xref != self.tip_xref:
-                    QToolTip.showText(e.globalPosition().toPoint(), content, self)
-                self.tip_xref = a.xref
-            else:
-                QToolTip.hideText()
-                self.tip_xref = None
+            self.hover_at(e.position(), e.globalPosition())
+
+    def hover_at(self, pos, global_pos):
+        a = self.annot_at(self.to_pdf(pos))
+        is_text = (not self.win.temporary_eraser and a is not None
+                   and a.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and self.win.tool in (None, "text"))
+        self.setCursor(Qt.SizeAllCursor if is_text else self.tool_cursor)
+        content = a.info["content"] if a and a.type[0] != pymupdf.PDF_ANNOT_FREE_TEXT else ""
+        if content:
+            if a.xref != self.tip_xref:
+                QToolTip.showText(global_pos.toPoint(), content, self)
+            self.tip_xref = a.xref
+        else:
+            QToolTip.hideText()
+            self.tip_xref = None
 
     def drag_quads(self):
         r = pymupdf.Rect(self.to_pdf(self.drag[0]), self.to_pdf(self.drag[1]))
         r.normalize()
         return line_quads(self.page, r + (-1, -1, 1, 1), self.get_words())
 
-    def mouseReleaseEvent(self, _e):
+    def finish_erase(self):
+        xrefs, self.erased = self.erased, None
+        self.erase_previous = None
+        self.erase_excluded = set()
+        if xrefs:
+            self.win.undo.beginMacro("지우기")
+            for x in xrefs:
+                self.win.undo.push(SetHidden(self.win, self.pno, x))
+            self.win.undo.endMacro()
+
+    def finish_ink(self):
+        pts = [self.to_pdf(p) for p in self.pts]
+        self.pts = []
+        xref = None
+        if len(pts) > 1:
+            c, w = rgb(self.win.colors["pen"]), self.win.width
+            command = AddAnnot(self.win, self.pno, lambda page: make_ink(page, pts, c, w), "펜")
+            self.win.undo.push(command)
+            xref = command.xref
+        self.update()
+        return xref
+
+    def mouseReleaseEvent(self, e):
+        if self.pen_input is not None or (self.win.temporary_eraser or self.win.tool == "pen") \
+                and e.button() in (Qt.LeftButton, Qt.RightButton):
+            self.update_pen_input(e.position(), self.mouse_input_mode(e))
+            e.accept()
+            return
         win, pno = self.win, self.pno
         if self.moving:
             xref, start, rect, cur = self.moving
@@ -511,19 +800,9 @@ class PageWidget(QWidget):
                 self.start_text(self.to_pdf(start), xref)
             self.update()
         elif self.erased is not None:
-            xrefs, self.erased = self.erased, None
-            if xrefs:
-                win.undo.beginMacro("지우기")
-                for x in xrefs:
-                    win.undo.push(SetHidden(win, pno, x))
-                win.undo.endMacro()
+            self.finish_erase()
         elif self.pts:
-            pts = [self.to_pdf(p) for p in self.pts]
-            self.pts = []
-            if len(pts) > 1:
-                c, w = rgb(win.colors["pen"]), win.width
-                win.undo.push(AddAnnot(win, pno, lambda page: make_ink(page, pts, c, w), "펜"))
-            self.update()
+            self.finish_ink()
         elif self.drag:
             quads, self.drag, self.preview = self.drag_quads(), None, []
             if quads:
@@ -539,6 +818,9 @@ class PageWidget(QWidget):
 
     def contextMenuEvent(self, e):
         win, pno = self.win, self.pno
+        if win.tool == "pen" or win.temporary_eraser:
+            e.accept()
+            return
         if win.tool:                 # 도구 켜진 상태에서 우클릭 = 도구 취소
             return win.set_tool(None)
         pt = self.to_pdf(QPointF(e.pos()))
@@ -618,6 +900,9 @@ TOOLS = [("✏️", "펜", "pen", "pencil"), ("🖍", "형광펜", "hl", "brush"
 class Win(QMainWindow):
     def __init__(self, path=None):
         super().__init__()
+        self.pen_button = PenButtonState(self.on_native_pen_button_changed) if sys.platform == "win32" else None
+        self.qt_pen_eraser = False
+        self._temporary_displayed = False
         self.doc, self.path, self.pages = None, None, []
         self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
         self.colors = dict(DEFAULT_COLORS)
@@ -672,6 +957,9 @@ class Win(QMainWindow):
         tb.addSeparator()
 
         self.scroll = QScrollArea(widgetResizable=True)
+        self.background_pan = BackgroundPan(self)
+        self.scroll.viewport().setAttribute(Qt.WA_AcceptTouchEvents)
+        self.scroll.viewport().installEventFilter(self.background_pan)
         self.scroll.verticalScrollBar().valueChanged.connect(self.update_page_label)
         self.setCentralWidget(self.scroll)
 
@@ -724,6 +1012,8 @@ class Win(QMainWindow):
         self.apply_theme(QSettings("pdf-editor", "PdfEditor").value("theme", "기본"))
         if path:
             self.open(path)
+        if self.pen_button:
+            QApplication.instance().installNativeEventFilter(self.pen_button)
 
     # --- 문서 ---
     def open(self, path):
@@ -741,6 +1031,7 @@ class Win(QMainWindow):
         for pw in self.pages:
             lay.addWidget(pw)
         self.scroll.setWidget(box)
+        self.background_pan.set_canvas(box)
         self.thumbs.clear()
         # ponytail: 열 때 전부 렌더(0.2배). 수백 페이지면 스크롤 시 지연 렌더로.
         for i in range(len(self.doc)):
@@ -802,6 +1093,8 @@ class Win(QMainWindow):
                 QMessageBox.critical(self, "저장 실패", f"변경 내용을 저장하지 못했습니다:\n{exc}")
                 e.ignore()
                 return
+        if self.pen_button:
+            QApplication.instance().removeNativeEventFilter(self.pen_button)
         e.accept()
 
     def dragEnterEvent(self, e):
@@ -853,17 +1146,47 @@ class Win(QMainWindow):
             self.set_zoom((self.scroll.viewport().width() - 48) / self.doc[0].rect.width)
 
     def set_tool(self, tool):
+        if tool != self.tool:
+            for pw in self.pages:
+                if pw.pen_input is not None:
+                    pw.finish_pen_input()
         self.tool = tool
-        for act in self.tool_group.actions():
-            act.setChecked(act.data() == tool)
         for pw in self.pages:                 # 도구 바뀌면 열려 있던 입력창은 취소
             for ed in pw.findChildren(InlineEditor):
                 ed.finish(False)
         self.update_swatch()
+        self.refresh_tool_display()
+
+    @property
+    def temporary_eraser(self):
+        return bool((self.pen_button and self.pen_button.eraser) or self.qt_pen_eraser)
+
+    def set_qt_pen_eraser(self, active):
+        if self.qt_pen_eraser != active:
+            self.qt_pen_eraser = active
+            self.refresh_tool_display()
+
+    def on_native_pen_button_changed(self):
+        if not self.pen_button.eraser:
+            self.qt_pen_eraser = False
+        self.refresh_tool_display()
+
+    def refresh_tool_display(self):
+        temporary = self.temporary_eraser
+        if temporary and not self._temporary_displayed:
+            for pw in self.pages:
+                if pw.drag or pw.moving:
+                    pw.drag = pw.moving = None
+                    pw.preview = []
+                    pw.update()
+        self._temporary_displayed = temporary
+        shown_tool = "erase" if temporary else self.tool
+        for act in self.tool_group.actions():
+            act.setChecked(act.data() == shown_tool)
         cursor = {"pen": Qt.CrossCursor, "hl": Qt.IBeamCursor, "text": Qt.IBeamCursor,
                   "note": Qt.PointingHandCursor, "erase": Qt.PointingHandCursor}
         for pw in self.pages:
-            pw.tool_cursor = cursor.get(self.tool, Qt.ArrowCursor)
+            pw.tool_cursor = cursor.get(shown_tool, Qt.ArrowCursor)
             pw.setCursor(pw.tool_cursor)
 
     # --- 테마 ---
