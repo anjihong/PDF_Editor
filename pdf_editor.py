@@ -790,7 +790,19 @@ class Win(QMainWindow):
         self.setWindowModified(not clean)
 
     def closeEvent(self, e):
-        e.accept() if self.confirm_discard() else e.ignore()
+        for pw in self.pages:
+            for ed in pw.findChildren(InlineEditor):
+                ed.finish(True)
+        if self.doc and not self.undo.isClean():
+            try:
+                if not self.save():
+                    e.ignore()
+                    return
+            except Exception as exc:
+                QMessageBox.critical(self, "저장 실패", f"변경 내용을 저장하지 못했습니다:\n{exc}")
+                e.ignore()
+                return
+        e.accept()
 
     def dragEnterEvent(self, e):
         if any(u.toLocalFile().lower().endswith(".pdf") for u in e.mimeData().urls()):
