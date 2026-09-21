@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_editor import (ASSETS, HIDDEN, TOOLS, line_quads, make_highlight, make_ink, make_note, make_text,
-                        purge_hidden, set_content, set_hidden, text_rect)
+from pdf_editor import (ASSETS, HIDDEN, TOOLS, line_quads, make_highlight, make_highlight_ink, make_ink,
+                        make_note, make_text, purge_hidden, segment_word_hits, set_content, set_hidden, text_rect)
 
 
 def main():
@@ -18,8 +18,17 @@ def main():
     # 형광펜: 두 줄에 걸친 드래그 -> 줄당 quad 1개
     quads = line_quads(page, pymupdf.Rect(80, 85, 150, 135))
     assert len(quads) == 2, quads
+    words = page.get_text("words")
+    first = pymupdf.Rect(words[0][:4])
+    hits = list(segment_word_hits(first.tl, first.br, words))
+    assert hits and hits[0][0] == (words[0][5], words[0][6])
+    assert not list(segment_word_hits(pymupdf.Point(10, 250), pymupdf.Point(80, 250), words))
     hl = make_highlight(page, quads, (1, 1, 0))
     assert hl.type[0] == pymupdf.PDF_ANNOT_HIGHLIGHT
+
+    freehand = make_highlight_ink(page, [pymupdf.Point(10, 230), pymupdf.Point(50, 240)], (1, 1, 0), 4)
+    assert freehand.type[0] == pymupdf.PDF_ANNOT_INK
+    assert abs(freehand.opacity - 0.35) < 0.01 and freehand.border["width"] == 4
 
     # 펜
     ink = make_ink(page, [pymupdf.Point(10, 10), pymupdf.Point(50, 60)], (1, 0, 0), 2)

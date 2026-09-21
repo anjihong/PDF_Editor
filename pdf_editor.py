@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDia
 
 HIDDEN = pymupdf.PDF_ANNOT_IS_HIDDEN
 ERASER_RADIUS_PX = 8
+HIGHLIGHT_INK_OPACITY = 0.35
 
 
 def page_settings_key(path):
@@ -125,6 +126,7 @@ class PenButtonState(QAbstractNativeEventFilter):
             self.on_change()
         return False
 FONT_SIZE = 20
+DEFAULT_HIGHLIGHT_WIDTH = FONT_SIZE
 DEFAULT_COLORS = {"pen": "#426eff", "hl": "#fdff95", "text": "#2864c6"}
 PRESETS = {"pen": ["#426eff", "#ff4d4f", "#222222", "#12b886"],
            "hl": ["#fdff95", "#c0fffd", "#ceffc9", "#ffd8d9"],
@@ -238,6 +240,21 @@ def line_quads(page, rect, words=None):
     return [r.quad for r in lines.values()]
 
 
+def segment_word_hits(start, end, words, tolerance=0):
+    """Return words touched by a stroke segment in unrotated PDF coordinates."""
+    a, b = (start.x, start.y), (end.x, end.y)
+    for x0, y0, x1, y1, _word, block, line, _number in words:
+        rect = pymupdf.Rect(x0 - tolerance, y0 - tolerance, x1 + tolerance, y1 + tolerance)
+        if rect.contains(start) or rect.contains(end):
+            yield (block, line), pymupdf.Rect(x0, y0, x1, y1)
+            continue
+        corners = [(rect.x0, rect.y0), (rect.x1, rect.y0),
+                   (rect.x1, rect.y1), (rect.x0, rect.y1)]
+        if any(segments_distance_sq(a, b, corners[i], corners[(i + 1) % 4]) == 0
+               for i in range(4)):
+            yield (block, line), pymupdf.Rect(x0, y0, x1, y1)
+
+
 def text_rect(pt, text, fs=FONT_SIZE):
     # ponytail: 글자 수 × fs 로 폭 추정(CJK 기준, 라틴은 여유 생김). 정확한 폭 필요하면 pymupdf.get_text_length.
     lines = text.split("\n")
@@ -258,6 +275,12 @@ def make_highlight(page, quads, color):
     a = page.add_highlight_annot(quads)
     a.set_colors(stroke=color)
     a.update()
+    return a
+
+
+def make_highlight_ink(page, pts, color, width):
+    a = make_ink(page, pts, color, width)
+    a.update(opacity=HIGHLIGHT_INK_OPACITY)
     return a
 
 
@@ -523,7 +546,8 @@ class PageWidget(QWidget):
         self.img = None
         self.words = None    # get_text("words") 캐시
         self.pts = []        # 펜 드래그 중 점(위젯 좌표)
-        self.drag = None     # 형광펜 드래그 [시작, 현재]
+        self.hl_points = []  # 형광펜 드래그 중 점(위젯 좌표)
+        self.hl_lines = {}   # 닿은 단어를 (block, line)별로 합친 영역
         self.preview = []    # 형광펜 미리보기 quads
         self.moving = None   # 텍스트 드래그 이동 [xref, 시작, 원래 rect, 현재]
         self.erased = None   # 지우개 드래그 중 숨긴 xref 목록
@@ -612,6 +636,10 @@ class PageWidget(QWidget):
             p.setBrush(color)
             for q in self.preview:
                 p.drawRect(self.to_widget(q.rect))
+        elif len(self.hl_points) > 1:
+            color.setAlpha(round(255 * HIGHLIGHT_INK_OPACITY))
+            p.setPen(QPen(color, self.win.hl_width * self.zoom, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPolyline(self.hl_points)
 
     # --- 펜 / 마우스 ---
     def update_pen_input(self, pos, mode):
@@ -658,6 +686,20 @@ class PageWidget(QWidget):
             mode = "erase" if tip_down else None
         elif self.win.tool == "pen":
             mode = ("erase" if buttons & Qt.RightButton else "pen") if tip_down else None
+        elif self.win.tool == "hl":
+            if self.pen_input is not None:
+                self.update_pen_input(e.position(), None)
+            if tip_down:
+                if not self.hl_points:
+                    self.start_highlight(e.position())
+                else:
+                    self.move_highlight(e.position())
+            elif self.hl_points:
+                self.finish_highlight(e.position())
+            else:
+                self.hover_at(e.position(), e.globalPosition())
+            e.accept()
+            return
         else:
             if self.pen_input is not None:
                 self.update_pen_input(e.position(), None)
@@ -700,7 +742,7 @@ class PageWidget(QWidget):
         if a and t is None and a.info["content"]:
             return self.start_note(pt, a.xref)
         if t == "hl":
-            self.drag = [e.position(), e.position()]
+            self.start_highlight(e.position())
         elif t == "text":
             self.start_text(pt)
         elif t == "note":
@@ -739,10 +781,8 @@ class PageWidget(QWidget):
             return
         if self.erased is not None:
             self.erase_at(self.to_pdf(e.position()))
-        elif self.drag:
-            self.drag[1] = e.position()
-            self.preview = self.drag_quads()
-            self.update()
+        elif self.hl_points:
+            self.move_highlight(e.position())
         elif self.moving:
             self.moving[3] = e.position()
             self.update()
@@ -763,10 +803,43 @@ class PageWidget(QWidget):
             QToolTip.hideText()
             self.tip_xref = None
 
-    def drag_quads(self):
-        r = pymupdf.Rect(self.to_pdf(self.drag[0]), self.to_pdf(self.drag[1]))
-        r.normalize()
-        return line_quads(self.page, r + (-1, -1, 1, 1), self.get_words())
+    def start_highlight(self, pos):
+        self.hl_points = [pos]
+        self.hl_lines = {}
+        self._match_highlight_segment(pos, pos)
+        self.update()
+
+    def _match_highlight_segment(self, start, end):
+        tolerance = 1 / self.zoom
+        for key, rect in segment_word_hits(self.to_pdf(start), self.to_pdf(end), self.get_words(), tolerance):
+            self.hl_lines[key] = self.hl_lines[key] | rect if key in self.hl_lines else rect
+        self.preview = [rect.quad for rect in self.hl_lines.values()]
+
+    def move_highlight(self, pos):
+        if pos != self.hl_points[-1]:
+            self._match_highlight_segment(self.hl_points[-1], pos)
+            self.hl_points.append(pos)
+            self.update()
+
+    def cancel_highlight(self):
+        self.hl_points = []
+        self.hl_lines = {}
+        self.preview = []
+        self.update()
+
+    def finish_highlight(self, pos):
+        self.move_highlight(pos)
+        quads = self.preview
+        pts = [self.to_pdf(p) for p in self.hl_points]
+        self.cancel_highlight()
+        color = rgb(self.win.colors["hl"])
+        if quads:
+            self.win.undo.push(AddAnnot(self.win, self.pno,
+                                        lambda page: make_highlight(page, quads, color), "형광펜"))
+        elif len(pts) > 1:
+            width = self.win.hl_width
+            self.win.undo.push(AddAnnot(self.win, self.pno,
+                                        lambda page: make_highlight_ink(page, pts, color, width), "형광펜"))
 
     def finish_erase(self):
         xrefs, self.erased = self.erased, None
@@ -810,12 +883,8 @@ class PageWidget(QWidget):
             self.finish_erase()
         elif self.pts:
             self.finish_ink()
-        elif self.drag:
-            quads, self.drag, self.preview = self.drag_quads(), None, []
-            if quads:
-                c = rgb(win.colors["hl"])
-                win.undo.push(AddAnnot(win, pno, lambda page: make_highlight(page, quads, c), "형광펜"))
-            self.update()
+        elif self.hl_points and e.button() == Qt.LeftButton:
+            self.finish_highlight(e.position())
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:
@@ -915,6 +984,7 @@ class Win(QMainWindow):
         self._restoring_page = False
         self._last_seen_page = None
         self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
+        self.hl_width = DEFAULT_HIGHLIGHT_WIDTH
         self.colors = dict(DEFAULT_COLORS)
         self.undo = QUndoStack(self)
         self.undo.cleanChanged.connect(self.on_clean_changed)
@@ -948,9 +1018,9 @@ class Win(QMainWindow):
         self.color_menu.aboutToShow.connect(self.build_color_menu)
         self.color_btn.setMenu(self.color_menu)
         tb.addWidget(self.color_btn)
-        spin = QSpinBox(minimum=1, maximum=20, value=self.width, prefix="굵기 ")
-        spin.valueChanged.connect(lambda v: setattr(self, "width", v))
-        tb.addWidget(spin)
+        self.width_spin = QSpinBox(minimum=1, maximum=20, value=self.width, prefix="굵기 ")
+        self.width_spin.valueChanged.connect(self.set_stroke_width)
+        tb.addWidget(self.width_spin)
         self.font_spin = QSpinBox(minimum=6, maximum=72, value=self.font_size, prefix="글자 ", suffix="pt")
         self.font_spin.valueChanged.connect(lambda v: setattr(self, "font_size", v))
         tb.addWidget(self.font_spin)
@@ -1197,12 +1267,27 @@ class Win(QMainWindow):
             for pw in self.pages:
                 if pw.pen_input is not None:
                     pw.finish_pen_input()
+                if pw.hl_points:
+                    pw.cancel_highlight()
         self.tool = tool
+        self.width_spin.blockSignals(True)
+        self.width_spin.setRange(1, 40 if tool == "hl" else 20)
+        self.width_spin.setValue(self.hl_width if tool == "hl" else self.width)
+        self.width_spin.blockSignals(False)
         for pw in self.pages:                 # 도구 바뀌면 열려 있던 입력창은 취소
             for ed in pw.findChildren(InlineEditor):
                 ed.finish(False)
         self.update_swatch()
         self.refresh_tool_display()
+
+    def set_stroke_width(self, width):
+        if self.tool == "hl":
+            self.hl_width = width
+        else:
+            self.width = width
+        for pw in self.pages:
+            if pw.hl_points or pw.pts:
+                pw.update()
 
     @property
     def temporary_eraser(self):
@@ -1222,9 +1307,10 @@ class Win(QMainWindow):
         temporary = self.temporary_eraser
         if temporary and not self._temporary_displayed:
             for pw in self.pages:
-                if pw.drag or pw.moving:
-                    pw.drag = pw.moving = None
-                    pw.preview = []
+                if pw.hl_points:
+                    pw.cancel_highlight()
+                if pw.moving:
+                    pw.moving = None
                     pw.update()
         self._temporary_displayed = temporary
         shown_tool = "erase" if temporary else self.tool
