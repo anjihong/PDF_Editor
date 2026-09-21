@@ -6,6 +6,7 @@
 """
 import re
 import sys
+import ctypes
 from functools import cache
 from pathlib import Path
 
@@ -923,9 +924,13 @@ class Win(QMainWindow):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pdf-editor.PdfEditor")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setWindowIcon(QIcon(str(ASSETS / "app.ico")))
+    app_icon = QIcon(str(ASSETS / "app.ico"))
+    app.setWindowIcon(app_icon)
     win = Win(sys.argv[1] if len(sys.argv) > 1 else None)
+    win.setWindowIcon(app_icon)
     win.show()
     sys.exit(app.exec())
