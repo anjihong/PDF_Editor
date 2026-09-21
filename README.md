@@ -3,9 +3,7 @@
 **PDF 위에 바로 쓰고, 표시하고, 메모하세요.** 펜·형광펜·텍스트·메모를 한곳에서 다루는 Windows용 데스크톱 앱입니다.
 
 <p align="center">
-  <a href="https://github.com/anjihong/PDF_Editor/releases/download/v1.0.0/PdfEditor.exe"><strong>⬇️ Windows 실행 파일 다운로드 (v1.0.0)</strong></a>
-  &nbsp;·&nbsp;
-  <a href="https://github.com/anjihong/PDF_Editor/releases/tag/v1.0.0">릴리즈 노트</a>
+  <a href="https://github.com/anjihong/PDF_Editor/releases"><strong>⬇️ Windows 실행 파일 다운로드</strong></a>
 </p>
 
 > [!TIP]
@@ -25,7 +23,7 @@
 
 ## 시작하기
 
-1. [v1.0.0 릴리즈](https://github.com/anjihong/PDF_Editor/releases/tag/v1.0.0)에서 `PdfEditor.exe`를 다운로드합니다.
+1. [릴리즈 페이지](https://github.com/anjihong/PDF_Editor/releases)에서 `PdfEditor.exe`를 다운로드합니다.
 2. exe를 실행하고 **열기**(`Ctrl+O`)로 PDF를 선택합니다. PDF 파일을 창에 끌어다 놓아도 됩니다.
 3. 도구 모음에서 펜·형광펜·텍스트·메모를 골라 편집하고 **저장**(`Ctrl+S`)합니다.
 
