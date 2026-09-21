@@ -8,6 +8,8 @@ import re
 import sys
 import ctypes
 import ctypes.wintypes
+import hashlib
+import os
 from functools import cache
 from pathlib import Path
 
@@ -23,6 +25,11 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDia
 
 HIDDEN = pymupdf.PDF_ANNOT_IS_HIDDEN
 ERASER_RADIUS_PX = 8
+
+
+def page_settings_key(path):
+    normalized = os.path.normcase(str(Path(path).resolve()))
+    return "lastPages/" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def point_segment_distance_sq(point, start, end):
@@ -904,6 +911,9 @@ class Win(QMainWindow):
         self.qt_pen_eraser = False
         self._temporary_displayed = False
         self.doc, self.path, self.pages = None, None, []
+        self._document_generation = 0
+        self._restoring_page = False
+        self._last_seen_page = None
         self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
         self.colors = dict(DEFAULT_COLORS)
         self.undo = QUndoStack(self)
@@ -1016,10 +1026,31 @@ class Win(QMainWindow):
             QApplication.instance().installNativeEventFilter(self.pen_button)
 
     # --- 문서 ---
+    def store_page(self, pno):
+        self._last_seen_page = pno
+        settings = QSettings("pdf-editor", "PdfEditor")
+        settings.setValue(page_settings_key(self.path), pno)
+        settings.sync()
+
+    def remember_current_page(self):
+        if not self.doc or not self.pages:
+            return
+        pno = self._last_seen_page if self._restoring_page else self.current_page()
+        self.store_page(pno)
+
     def open(self, path):
         # 파일을 메모리로 읽어 열기: 파일 잠금 없음, 같은 경로에 그대로 저장 가능.
-        self.doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf")
+        new_doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf")
+        self.remember_current_page()
+        self.doc = new_doc
         self.path = path
+        self._document_generation += 1
+        self._restoring_page = True
+        try:
+            stored = int(QSettings("pdf-editor", "PdfEditor").value(page_settings_key(path), 0))
+        except (TypeError, ValueError):
+            stored = 0
+        self._last_seen_page = max(0, min(stored, len(self.doc) - 1))
         self.undo.clear()
         box = QWidget()
         self.paint_canvas(box)
@@ -1039,7 +1070,8 @@ class Win(QMainWindow):
         self.page_spin.setMaximum(len(self.doc))
         self.page_label.setText(f"/ {len(self.doc)}")
         self.setWindowTitle(f"{Path(path).name} - PDF 편집기[*]")
-        QTimer.singleShot(0, self.fit_width)
+        generation = self._document_generation
+        QTimer.singleShot(0, lambda: self.fit_width() if generation == self._document_generation else None)
 
     def open_dialog(self):
         if not self.confirm_discard():
@@ -1066,9 +1098,13 @@ class Win(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "다른 이름으로 저장", self.path, "PDF (*.pdf)")
         if not path:
             return False
+        self.remember_current_page()
         self.path = path
         self.setWindowTitle(f"{Path(path).name} - PDF 편집기[*]")
-        return self.save()
+        saved = self.save()
+        if saved:
+            self.remember_current_page()
+        return saved
 
     def confirm_discard(self):
         if not self.doc or self.undo.isClean():
@@ -1093,6 +1129,7 @@ class Win(QMainWindow):
                 QMessageBox.critical(self, "저장 실패", f"변경 내용을 저장하지 못했습니다:\n{exc}")
                 e.ignore()
                 return
+        self.remember_current_page()
         if self.pen_button:
             QApplication.instance().removeNativeEventFilter(self.pen_button)
         e.accept()
@@ -1123,6 +1160,8 @@ class Win(QMainWindow):
         self.thumbs.setCurrentRow(pno)
         for w in (self.page_spin, self.thumbs):
             w.blockSignals(False)
+        if not self._restoring_page and pno != self._last_seen_page:
+            self.store_page(pno)
 
     def goto_page(self, pno):
         if 0 <= pno < len(self.pages):
@@ -1134,12 +1173,20 @@ class Win(QMainWindow):
 
     # --- 편집 ---
     def set_zoom(self, z):
-        pno = self.current_page()
+        pno = self._last_seen_page if self._restoring_page else self.current_page()
+        generation = self._document_generation
         self.zoom = max(0.3, min(5.0, z))
         for pw in self.pages:
             pw.invalidate(thumb=False)
         self.zoom_act.setText(f"{self.zoom * 100:.0f}%")
-        QTimer.singleShot(0, lambda: self.goto_page(pno))
+        def finish_zoom():
+            if generation != self._document_generation:
+                return
+            self.goto_page(pno)
+            if self._restoring_page:
+                self._restoring_page = False
+                self.update_page_label()
+        QTimer.singleShot(0, finish_zoom)
 
     def fit_width(self):
         if self.pages:
