@@ -24,6 +24,13 @@ python pdf_editor.py [파일.pdf]
 
 `build.bat` 실행. `.venv` 생성, 의존성 설치, PyInstaller 빌드까지 한 번에 하고 `dist\PdfEditor.exe`가 만들어진다.
 
+## 테마
+
+상태바 오른쪽 **테마** 버튼으로 기본 / 파스텔 전환 (마지막 선택 기억). 파스텔 테마 자원은 `assets/`:
+
+- 글꼴 [Galmuri11](https://github.com/quiple/galmuri) — SIL OFL 1.1 (`assets/fonts/OFL.md`)
+- 아이콘 [pixelarticons](https://github.com/halfmage/pixelarticons) — MIT (`assets/icons/LICENSE`)
+
 ## 단축키
 
 | 키 | 동작 |
