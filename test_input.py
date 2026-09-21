@@ -141,7 +141,7 @@ def main():
             native.nativeEventFilter(b"windows_generic_MSG", ctypes.addressof(msg))
             tablet_event(page, device, QEvent.TabletRelease, 150, 100, 0, Qt.LeftButton, Qt.NoButton)
             assert win.tool == selected_tool and not win.temporary_eraser
-            assert all(a.isChecked() == (a.data() == selected_tool and selected_tool is not None)
+            assert all(a.isChecked() == (a.data() == selected_tool)
                        for a in win.tool_group.actions())
             win.undo.undo()
             assert not win.doc[0].load_annot(ink.xref).flags & HIDDEN

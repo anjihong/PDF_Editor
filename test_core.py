@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pymupdf
 
-from pdf_editor import (ASSETS, HIDDEN, TOOLS, line_quads, make_highlight, make_highlight_ink, make_ink,
+from pdf_editor import (HIDDEN, TOOLS, UI_ICONS, line_quads, make_highlight, make_highlight_ink, make_ink,
                         make_note, make_text, purge_hidden, segment_word_hits, set_content, set_hidden, text_rect)
 
 
@@ -76,10 +76,9 @@ def main():
         assert len(annots) == 1 and annots[0].info["content"] == "형광펜 메모", annots
         doc2.close()
 
-    # 파스텔 테마 자원: 도구 아이콘 SVG와 글꼴이 assets/에 있어야 함
+    # 새 UI에서 각 도구가 선형 아이콘을 제공해야 함
     for *_, icon in TOOLS:
-        assert (ASSETS / "icons" / f"{icon}.svg").exists(), icon
-    assert (ASSETS / "fonts" / "Galmuri11.ttf").exists()
+        assert icon in UI_ICONS, icon
     print("ok")
 
 
