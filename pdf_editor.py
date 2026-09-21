@@ -6,12 +6,14 @@
 """
 import re
 import sys
+from functools import cache
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import Qt, QRectF, QPointF, QSize, QTimer
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QTextCursor,
-                           QPixmap, QUndoCommand, QUndoStack)
+from PySide6.QtCore import Qt, QByteArray, QRectF, QPointF, QSettings, QSize, QTimer
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
+                           QPainter, QPalette, QPen, QPixmap, QTextCursor, QUndoCommand, QUndoStack)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
                                QTextEdit, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget)
@@ -32,14 +34,13 @@ THUMB_ZOOM = 0.2
 QSS = """
 QMainWindow { background: #f4f4f6; }
 QToolBar { background: #ffffff; border-bottom: 1px solid #d9d9de; padding: 4px 8px; spacing: 2px; }
-QToolBar QToolButton { padding: 6px 10px; border-radius: 6px; color: #222; font-size: 13px; }
-QToolBar QToolButton:hover { background: #eef0f3; }
+QToolBar QToolButton, QStatusBar QToolButton { padding: 6px 10px; border-radius: 6px; color: #222; }
+QToolBar QToolButton:hover, QStatusBar QToolButton:hover { background: #eef0f3; }
 QToolBar QToolButton:checked { background: #dbe8ff; color: #1657d0; font-weight: 600; }
 QToolBar QToolButton:disabled { color: #b0b0b5; }
 QToolBar::separator { width: 1px; background: #e0e0e4; margin: 6px 6px; }
 QToolBar QSpinBox, QStatusBar QSpinBox { padding: 3px 6px; border: 1px solid #d9d9de; border-radius: 6px; background: #fff; }
 QScrollArea { border: none; }
-#canvas { background: #e4e5e9; }
 QStatusBar { background: #ffffff; border-top: 1px solid #d9d9de; color: #444; }
 QDockWidget { font-weight: 600; color: #444; }
 QDockWidget::title { background: #f4f4f6; padding: 6px; border-bottom: 1px solid #d9d9de; }
@@ -48,6 +49,76 @@ QListWidget::item { color: #555; padding: 4px; border-radius: 6px; }
 QListWidget::item:selected { background: #dbe8ff; color: #1657d0; }
 QToolTip { background: #fff8b3; color: #333; border: 1px solid #e0c200; padding: 6px; }
 """
+
+ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "assets"   # exe(onefile)는 _MEIPASS에 풀림
+
+# 파스텔: 라벤더 바탕에 1px 선, 작업대(PDF 뒤)만 크림, 핑크는 선택 포인트만. 글꼴 Galmuri11, 아이콘 pixelarticons (assets/에 라이선스 동봉)
+PASTEL_QSS = """
+QMainWindow, QDialog { background: #f7f3fb; }
+QLabel { color: #5a4a6e; }
+QToolBar { background: #f7f3fb; border: none; border-bottom: 1px solid #ddd3ec; padding: 4px 6px; spacing: 2px; }
+QToolBar QToolButton, QStatusBar QToolButton { background: transparent; color: #5a4a6e; padding: 3px 7px;
+    border: 1px solid transparent; border-radius: 0; }
+QToolBar QToolButton:hover, QStatusBar QToolButton:hover { background: #eee8f8; border-color: #ddd3ec; }
+QToolBar QToolButton:checked { background: #e6defb; color: #45347a; border-color: #a898dc; }
+QToolBar QToolButton:pressed, QStatusBar QToolButton:pressed { background: #ddd4f7; border-color: #a898dc; }
+QToolBar QToolButton:disabled { color: #c3b9d3; }
+QToolBar QToolButton::menu-indicator, QStatusBar QToolButton::menu-indicator { image: none; width: 0; }
+QToolBar::separator { width: 1px; background: #ddd3ec; margin: 6px 5px; }
+QSpinBox { background: #fffdf7; color: #5a4a6e; padding: 3px 4px; border: 1px solid #d3c7e6; border-radius: 0;
+    selection-background-color: #f4c9dc; selection-color: #5a4a6e; }
+QSpinBox:focus { border-color: #a898dc; }
+QStatusBar { background: #f7f3fb; border-top: 1px solid #ddd3ec; }
+QDockWidget { color: #5a4a6e; font-weight: bold; }
+QDockWidget::title { background: #f5dbe7; padding: 6px 8px; border-bottom: 1px solid #e8bfd2; }
+QListWidget { background: #f1ecf8; border: none; outline: none; }
+QListWidget::item { color: #9a8cb0; padding: 4px; border: 2px solid transparent; }
+QListWidget::item:selected { background: transparent; color: #5a4a6e; border: 2px solid #eea5c4; }
+QMenu { background: #fffdf8; border: 1px solid #cdbfe0; padding: 3px; }
+QMenu::item { color: #5a4a6e; padding: 5px 18px 5px 26px; }
+QMenu::item:selected { background: #f5dbe7; }
+QMenu::separator { height: 1px; background: #e5dcef; margin: 3px 6px; }
+QPushButton { background: #fffdf8; color: #5a4a6e; padding: 5px 14px; min-width: 60px; border: 1px solid #cdbfe0; }
+QPushButton:hover { background: #eee8f8; }
+QPushButton:pressed, QPushButton:default { border-color: #a898dc; }
+QScrollArea { border: none; }
+QScrollBar:vertical { background: #f1ecf8; width: 12px; margin: 0; }
+QScrollBar:horizontal { background: #f1ecf8; height: 12px; margin: 0; }
+QScrollBar::handle { background: #dcd2f1; border: 1px solid #bcaedb; }
+QScrollBar::handle:hover { background: #cfc2ee; }
+QScrollBar::handle:vertical { min-height: 32px; }
+QScrollBar::handle:horizontal { min-width: 32px; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; background: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+QToolTip { background: #fff6d6; color: #5a4a2e; border: 1px solid #e2c77a; padding: 6px; }
+"""
+
+THEMES = {
+    "기본": dict(qss=QSS, font="Galmuri11", icons=None, canvas="#e4e5e9", dots=None, page_border="#c9c9ce", shadow=0,
+                shadow_color=None, marker=("#ffd83d", "#b38f00", "#6b5600"),
+                note_style="QTextEdit{background:#fff8b3;color:#333;border:1px solid #e0c200;border-radius:4px;padding:4px}"),
+    "파스텔": dict(qss=PASTEL_QSS, font="Galmuri11", icons="#5a4a6e", canvas="#fcf6ce", dots="#efe6b4",
+                 page_border="#d8c9a6", shadow=4, shadow_color="#ebdfae", marker=("#ffe79a", "#c7a24a", "#7a5e1f"),
+                 note_style="QTextEdit{background:#fff6d6;color:#5a4a2e;border:1px solid #e2c77a;padding:4px}"),
+}
+
+
+@cache
+def icon_px(dpr):
+    """24px 격자 아이콘은 실제 화면 픽셀 정수배일 때만 선명. 125% 배율이면 24px 그대로(논리 크기 19)."""
+    return 24 * max(1, int(dpr))
+
+
+@cache
+def theme_icon(name, color, dpr):
+    svg = (ASSETS / "icons" / f"{name}.svg").read_bytes().replace(b"currentColor", color.encode())
+    img = QImage(icon_px(dpr), icon_px(dpr), QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    QSvgRenderer(QByteArray(svg)).render(p)
+    p.end()
+    img.setDevicePixelRatio(dpr)
+    return QIcon(QPixmap.fromImage(img))
 
 
 # ---------- 순수 PyMuPDF 헬퍼 (GUI 없이 테스트 가능) ----------
@@ -298,8 +369,8 @@ class PageWidget(QWidget):
 
     def invalidate(self, thumb=True):
         self.img = None
-        r = self.page.rect
-        self.setFixedSize(int(r.width * self.zoom), int(r.height * self.zoom))
+        r, s = self.page.rect, self.win.theme["shadow"]
+        self.setFixedSize(int(r.width * self.zoom) + s, int(r.height * self.zoom) + s)
         self.update()
         if thumb:
             self.win.update_thumb(self.pno)
@@ -328,10 +399,14 @@ class PageWidget(QWidget):
         if self.img is None:
             self.img = to_qimage(self.page, self.zoom * dpr)
             self.img.setDevicePixelRatio(dpr)
+        theme, s = self.win.theme, self.win.theme["shadow"]
+        paper = QRectF(0, 0, self.width() - s, self.height() - s)
         p = QPainter(self)
+        if s:
+            p.fillRect(paper.translated(s, s), QColor(theme["shadow_color"]))
         p.drawImage(0, 0, self.img)
-        p.setPen(QPen(QColor("#c9c9ce"), 1))
-        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        p.setPen(QPen(QColor(theme["page_border"]), 1))
+        p.drawRect(paper.adjusted(0, 0, -1, -1))
         p.setRenderHint(QPainter.Antialiasing)
         # 메모 표식: 내용 있는 형광펜/펜 주석 우상단에 말풍선
         page = self.page
@@ -340,10 +415,11 @@ class PageWidget(QWidget):
                     and not a.flags & HIDDEN:
                 r = self.to_widget(a.rect)
                 m = QRectF(r.right() - 7, r.top() - 9, 16, 14)
-                p.setPen(QPen(QColor("#b38f00"), 1))
-                p.setBrush(QColor("#ffd83d"))
+                fill, edge, line = theme["marker"]
+                p.setPen(QPen(QColor(edge), 1))
+                p.setBrush(QColor(fill))
                 p.drawRoundedRect(m, 3, 3)
-                p.setPen(QPen(QColor("#6b5600"), 1.5))
+                p.setPen(QPen(QColor(line), 1.5))
                 for i in range(3):
                     p.drawLine(QPointF(m.left() + 4, m.top() + 4 + i * 3), QPointF(m.right() - 4, m.top() + 4 + i * 3))
         color = QColor(self.win.colors.get(self.win.tool, "#000000"))
@@ -508,12 +584,14 @@ class PageWidget(QWidget):
                 col = rgb(win.colors["text"])
                 win.undo.push(AddAnnot(win, pno, lambda page: make_text(page, pt, text, col, fs), "텍스트"))
         ed = InlineEditor(self, pos, old, round(win.font_size * z), style, done)
+        ed.setFont(win.base_font)
+        ed.set_font_px(round(win.font_size * z))
         win.font_spin.valueChanged.connect(lambda v: ed.set_font_px(round(v * z)))
 
     def start_note(self, pt, xref=None):
         win, pno = self.win, self.pno
         QToolTip.hideText()
-        style = "QTextEdit{background:#fff8b3;color:#333;border:1px solid #e0c200;border-radius:4px;padding:4px}"
+        style = win.theme["note_style"]
         page = self.page
         if xref is not None:
             a = page.load_annot(xref)
@@ -532,7 +610,8 @@ class PageWidget(QWidget):
 
 # ---------- 메인 창 ----------
 
-TOOLS = [("✏️ 펜", "pen"), ("🖍 형광펜", "hl"), ("T 텍스트", "text"), ("💬 메모", "note"), ("🧽 지우개", "erase")]
+TOOLS = [("✏️", "펜", "pen", "pencil"), ("🖍", "형광펜", "hl", "brush"), ("T", "텍스트", "text", "text-start-t"),
+         ("💬", "메모", "note", "sticky-note-text"), ("🧽", "지우개", "erase", "eraser")]
 
 
 class Win(QMainWindow):
@@ -545,21 +624,27 @@ class Win(QMainWindow):
         self.undo.cleanChanged.connect(self.on_clean_changed)
         self.setAcceptDrops(True)
         self.resize(1200, 900)
+        self.base_font = QApplication.font()
+        for f in (ASSETS / "fonts").glob("*.ttf"):
+            QFontDatabase.addApplicationFont(str(f))
 
-        tb = QToolBar("도구")
+        tb = self.tb = QToolBar("도구")
         tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
-        tb.addAction("📂 열기", QKeySequence.Open, self.open_dialog)
-        tb.addAction("💾 저장", QKeySequence.Save, self.save)
+        self.themed = []   # (액션, 기본 텍스트, 아이콘 테마 텍스트, 아이콘). 텍스트 None이면 아이콘만 바꿈
+        self.themed.append((tb.addAction("📂 열기", QKeySequence.Open, self.open_dialog), "📂 열기", "열기", "folder"))
+        self.themed.append((tb.addAction("💾 저장", QKeySequence.Save, self.save), "💾 저장", "저장", "save"))
         tb.addAction("다른 이름으로", QKeySequence.SaveAs, self.save_as)
         tb.addSeparator()
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)   # 다시 누르면 꺼짐 = 선택 모드
-        for i, (name, tool) in enumerate(TOOLS):
-            act = QAction(name, self, checkable=True, shortcut=str(i + 1))
+        for i, (emoji, name, tool, icon) in enumerate(TOOLS):
+            act = QAction(f"{emoji} {name}", self, checkable=True, shortcut=str(i + 1))
             act.setData(tool)
             self.tool_group.addAction(act)
             tb.addAction(act)
+            self.themed.append((act, f"{emoji} {name}", name, icon))
         self.tool_group.triggered.connect(lambda act: self.set_tool(act.data() if act.isChecked() else None))
         tb.addSeparator()
         self.color_btn = QToolButton(text="색", popupMode=QToolButton.InstantPopup, toolButtonStyle=Qt.ToolButtonTextBesideIcon)
@@ -574,14 +659,15 @@ class Win(QMainWindow):
         self.font_spin.valueChanged.connect(lambda v: setattr(self, "font_size", v))
         tb.addWidget(self.font_spin)
         tb.addSeparator()
-        for act, key in [(self.undo.createUndoAction(self, "↶"), QKeySequence.Undo),
-                         (self.undo.createRedoAction(self, "↷"), QKeySequence.Redo)]:
+        for act, key, icon in [(self.undo.createUndoAction(self, "↶"), QKeySequence.Undo, "undo"),
+                               (self.undo.createRedoAction(self, "↷"), QKeySequence.Redo, "redo")]:
             act.setShortcuts(key)
             tb.addAction(act)
+            self.themed.append((act, None, None, icon))   # 텍스트는 QUndoStack이 갱신
         tb.addSeparator()
-        tb.addAction("－", QKeySequence.ZoomOut, lambda: self.set_zoom(self.zoom / 1.2))
+        self.themed.append((tb.addAction("－", QKeySequence.ZoomOut, lambda: self.set_zoom(self.zoom / 1.2)), None, None, "zoom-out"))
         self.zoom_act = tb.addAction("100%", self.fit_width)
-        tb.addAction("＋", QKeySequence.ZoomIn, lambda: self.set_zoom(self.zoom * 1.2))
+        self.themed.append((tb.addAction("＋", QKeySequence.ZoomIn, lambda: self.set_zoom(self.zoom * 1.2)), None, None, "zoom-in"))
         tb.addSeparator()
 
         self.scroll = QScrollArea(widgetResizable=True)
@@ -606,6 +692,19 @@ class Win(QMainWindow):
         toggle = dock.toggleViewAction()
         toggle.setText("☰ 페이지 목록")
         tb.addAction(toggle)
+        self.themed.append((toggle, "☰ 페이지 목록", "페이지 목록", "layout"))
+        theme_menu = QMenu(self)
+        self.theme_group = QActionGroup(self)
+        for name in THEMES:
+            self.theme_group.addAction(theme_menu.addAction(name)).setCheckable(True)
+        self.theme_group.triggered.connect(lambda act: self.apply_theme(act.text()))
+        theme_act = QAction("🎨 테마", self)
+        theme_act.setMenu(theme_menu)
+        theme_btn = self.theme_btn = QToolButton(toolButtonStyle=Qt.ToolButtonTextBesideIcon)   # 툴바 끝은 창이 좁으면 잘려서 상태바 오른쪽에 둠
+        theme_btn.setDefaultAction(theme_act)
+        theme_btn.setPopupMode(QToolButton.InstantPopup)
+        self.statusBar().addPermanentWidget(theme_btn)
+        self.themed.append((theme_act, "🎨 테마", "테마", "colors-swatch"))
 
         self.page_spin = QSpinBox(minimum=1, maximum=1)
         self.page_spin.editingFinished.connect(lambda: self.goto_page(self.page_spin.value() - 1))
@@ -621,6 +720,7 @@ class Win(QMainWindow):
 
         self.update_swatch()
         self.setWindowTitle("PDF 편집기[*]")
+        self.apply_theme(QSettings("pdf-editor", "PdfEditor").value("theme", "기본"))
         if path:
             self.open(path)
 
@@ -630,7 +730,8 @@ class Win(QMainWindow):
         self.doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf")
         self.path = path
         self.undo.clear()
-        box = QWidget(objectName="canvas")
+        box = QWidget()
+        self.paint_canvas(box)
         lay = QVBoxLayout(box)
         lay.setAlignment(Qt.AlignHCenter)
         lay.setSpacing(16)
@@ -752,6 +853,47 @@ class Win(QMainWindow):
             pw.tool_cursor = cursor.get(self.tool, Qt.ArrowCursor)
             pw.setCursor(pw.tool_cursor)
 
+    # --- 테마 ---
+    def apply_theme(self, name):
+        name = name if name in THEMES else "기본"
+        t = self.theme = THEMES[name]
+        font = QFont(self.base_font)
+        if t["font"]:
+            font = QFont(t["font"])
+            font.setPixelSize(12)   # Galmuri11은 12px에 맞춰 그려진 도트 글꼴
+        QApplication.setFont(font)
+        QApplication.instance().setStyleSheet(t["qss"])
+        dpr = self.screen().devicePixelRatio()
+        size = round(icon_px(dpr) / dpr)
+        for w in (self.tb, self.theme_btn):
+            w.setIconSize(QSize(size, size))
+        for act, text, icon_text, icon in self.themed:
+            if text is not None:
+                act.setText(f" {icon_text}" if t["icons"] else text)   # 앞 공백 = 아이콘과 글자 사이 여백
+            act.setIcon(theme_icon(icon, t["icons"], dpr) if t["icons"] else QIcon())
+            if btn := self.tb.widgetForAction(act):
+                icon_only = t["icons"] and text is None
+                btn.setToolButtonStyle(Qt.ToolButtonIconOnly if icon_only else Qt.ToolButtonTextBesideIcon)
+        for act in self.theme_group.actions():
+            act.setChecked(act.text() == name)
+        if self.scroll.widget():
+            self.paint_canvas(self.scroll.widget())
+        for pw in self.pages:
+            pw.invalidate(thumb=False)
+        QSettings("pdf-editor", "PdfEditor").setValue("theme", name)
+
+    def paint_canvas(self, box):
+        tile = QPixmap(14, 14)
+        tile.fill(QColor(self.theme["canvas"]))
+        if self.theme["dots"]:
+            p = QPainter(tile)
+            p.fillRect(6, 6, 2, 2, QColor(self.theme["dots"]))
+            p.end()
+        pal = box.palette()
+        pal.setBrush(QPalette.Window, QBrush(tile))
+        box.setPalette(pal)
+        box.setAutoFillBackground(True)
+
     @property
     def color_key(self):
         return self.tool if self.tool in self.colors else "pen"
@@ -783,7 +925,7 @@ class Win(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(QSS)
+    app.setWindowIcon(QIcon(str(ASSETS / "app.ico")))
     win = Win(sys.argv[1] if len(sys.argv) > 1 else None)
     win.show()
     sys.exit(app.exec())
