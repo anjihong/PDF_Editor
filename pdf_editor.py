@@ -9,6 +9,7 @@ import sys
 import ctypes
 import ctypes.wintypes
 import hashlib
+import math
 import os
 from functools import cache
 from pathlib import Path
@@ -137,7 +138,8 @@ PRESETS = {"pen": ["#426eff", "#ff4d4f", "#222222", "#12b886"],
 def rgb(hex_color):
     c = QColor(hex_color)
     return (c.redF(), c.greenF(), c.blueF())
-THUMB_ZOOM = 0.2
+THUMB_ITEM_INSET = 12
+THUMB_REFIT_DELAY_MS = 100
 
 def theme_qss(c):
     return """
@@ -372,8 +374,10 @@ def to_qimage(page, zoom):
     return QImage(pix.samples_mv, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
 
 
-def thumbnail_icon(page):
-    pixmap = QPixmap.fromImage(to_qimage(page, THUMB_ZOOM))
+def thumbnail_icon(page, width, dpr=1.0):
+    render_width = max(1, round(width * dpr))
+    pixmap = QPixmap.fromImage(to_qimage(page, render_width / page.rect.width))
+    pixmap.setDevicePixelRatio(dpr)
     icon = QIcon()
     icon.addPixmap(pixmap, QIcon.Normal)
     icon.addPixmap(pixmap, QIcon.Selected)
@@ -1128,10 +1132,13 @@ class Win(QMainWindow):
         self.thumbs.setWrapping(False)
         self.thumbs.setMovement(QListWidget.Static)
         self.thumbs.setResizeMode(QListWidget.Adjust)
-        self.thumbs.setIconSize(QSize(140, 140))
         self.thumbs.setSpacing(6)
-        self.thumbs.setUniformItemSizes(True)
+        self.thumbs.setUniformItemSizes(False)
         self.thumbs.currentRowChanged.connect(self.goto_page)
+        self._thumbnail_width = 0
+        self._thumbnail_timer = QTimer(self, singleShot=True, interval=THUMB_REFIT_DELAY_MS)
+        self._thumbnail_timer.timeout.connect(self.refit_thumbnails)
+        self.thumbs.viewport().installEventFilter(self)
         self.pages_dock = self.make_dock("페이지", self.thumbs, Qt.LeftDockWidgetArea, 190)
         self.properties_dock = self.make_dock("속성", self.make_properties(), Qt.RightDockWidgetArea, 220)
         self.pages_dock.visibilityChanged.connect(self.schedule_refit)
@@ -1321,6 +1328,11 @@ class Win(QMainWindow):
         if self.scroll_page_indicator.isVisible():
             self.position_scroll_page_indicator()
 
+    def eventFilter(self, obj, event):
+        if obj is self.thumbs.viewport() and event.type() == QEvent.Resize:
+            self.schedule_thumbnail_refit()
+        return super().eventFilter(obj, event)
+
     def schedule_refit(self):
         if self.fit_mode and self.pages:
             QTimer.singleShot(0, lambda: self.fit_width() if self.fit_mode else None)
@@ -1364,9 +1376,10 @@ class Win(QMainWindow):
         self.scroll.setWidget(box)
         self.background_pan.set_canvas(box)
         self.thumbs.clear()
-        # ponytail: 열 때 전부 렌더(0.2배). 수백 페이지면 스크롤 시 지연 렌더로.
         for i in range(len(self.doc)):
-            self.thumbs.addItem(QListWidgetItem(thumbnail_icon(self.doc[i]), str(i + 1)))
+            self.thumbs.addItem(QListWidgetItem(str(i + 1)))
+        self._thumbnail_width = 0
+        QTimer.singleShot(0, self.refit_thumbnails)
         self.page_spin.setMaximum(len(self.doc))
         self.page_label.setText(f"/ {len(self.doc)}")
         self.setWindowTitle(f"{Path(path).name} - PDF 편집기[*]")
@@ -1497,7 +1510,38 @@ class Win(QMainWindow):
 
     def update_thumb(self, pno):
         if pno < self.thumbs.count():
-            self.thumbs.item(pno).setIcon(thumbnail_icon(self.doc[pno]))
+            width = self.thumbnail_width()
+            page = self.doc[pno]
+            height = math.ceil(width * page.rect.height / page.rect.width)
+            item = self.thumbs.item(pno)
+            item.setIcon(thumbnail_icon(page, width, self.thumbs.devicePixelRatioF()))
+            item.setSizeHint(QSize(self.thumbs.viewport().width() - 2 * self.thumbs.spacing(),
+                                   height + self.thumbs.fontMetrics().height() + 16))
+
+    def thumbnail_width(self):
+        return max(1, self.thumbs.viewport().width() - 2 * self.thumbs.spacing() - THUMB_ITEM_INSET)
+
+    def schedule_thumbnail_refit(self):
+        if self.doc and self.thumbs.count():
+            self._thumbnail_timer.start()
+
+    def refit_thumbnails(self):
+        if not self.doc or not self.thumbs.count():
+            return
+        width = self.thumbnail_width()
+        if width == self._thumbnail_width:
+            return
+        current = self.thumbs.currentItem()
+        heights = [math.ceil(width * page.rect.height / page.rect.width) for page in self.doc]
+        self._thumbnail_width = width
+        self.thumbs.setUpdatesEnabled(False)
+        self.thumbs.setIconSize(QSize(width, max(heights)))
+        for pno in range(self.thumbs.count()):
+            self.update_thumb(pno)
+        self.thumbs.setUpdatesEnabled(True)
+        self.thumbs.doItemsLayout()
+        if current:
+            self.thumbs.scrollToItem(current)
 
     # --- 편집 ---
     def set_zoom(self, z, fit=False):

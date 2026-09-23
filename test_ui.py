@@ -6,7 +6,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider
 
@@ -26,8 +26,9 @@ def main():
         settings.setValue("theme", "파스텔")
         path = Path(directory) / "workspace.pdf"
         doc = pymupdf.open()
-        for _ in range(3):
-            doc.new_page(width=595, height=842)
+        doc.new_page(width=595, height=842)
+        doc.new_page(width=842, height=595)
+        doc.new_page(width=420, height=842)
         doc.save(path)
         doc.close()
 
@@ -41,6 +42,37 @@ def main():
         assert win.theme_actions["다크"].isChecked() and not win.theme_actions["라이트"].isChecked()
         assert win.pages_dock.isVisible() and win.properties_dock.isVisible()
         assert not win.scroll_page_indicator.isVisible()
+        QTest.qWait(130)
+        settle(app)
+
+        def assert_thumbnails_fit():
+            expected_width = win.thumbnail_width()
+            assert win.thumbs.iconSize().width() == expected_width
+            for pno in range(win.thumbs.count()):
+                actual = win.thumbs.item(pno).icon().actualSize(win.thumbs.iconSize())
+                page = win.doc[pno]
+                assert actual.width() == expected_width
+                assert abs(actual.height() / actual.width() - page.rect.height / page.rect.width) < 0.02
+
+        assert_thumbnails_fit()
+        selected_page = win.current_page()
+        old_thumb_width = win.thumbs.iconSize().width()
+        win.resizeDocks([win.pages_dock], [320], Qt.Horizontal)
+        QTest.qWait(130)
+        settle(app)
+        assert win.thumbs.iconSize().width() > old_thumb_width
+        assert win.current_page() == selected_page
+        assert win.thumbs.currentRow() == selected_page
+        assert_thumbnails_fit()
+        win.update_thumb(0)
+        assert win.thumbs.item(0).icon().actualSize(win.thumbs.iconSize()).width() == win.thumbs.iconSize().width()
+        wide_thumb_width = win.thumbs.iconSize().width()
+        win.resizeDocks([win.pages_dock], [205], Qt.Horizontal)
+        QTest.qWait(130)
+        settle(app)
+        assert win.thumbs.iconSize().width() < wide_thumb_width
+        assert win.current_page() == selected_page
+        assert_thumbnails_fit()
 
         win.resize(1024, 768)
         settle(app)
