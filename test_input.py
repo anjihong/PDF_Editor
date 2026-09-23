@@ -9,7 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QContextMenuEvent, QInputDevice, QPointingDevice, QTabletEvent, QTouchEvent
+from PySide6.QtGui import (QContextMenuEvent, QInputDevice, QPointingDevice, QTabletEvent,
+                           QTouchEvent, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -41,6 +42,57 @@ def main():
         app.processEvents()
         app.processEvents()
         page = win.pages[0]
+
+        # High-resolution Ctrl+wheel input uses the actual delta instead of a fixed 10% step.
+        page.repaint()
+        app.processEvents()
+        cached_image = page.img
+        old_zoom = win.zoom
+        local = QPointF(100, 100)
+        global_pos = QPointF(page.mapToGlobal(local.toPoint()))
+        viewport_pos = QPointF(win.scroll.viewport().mapFromGlobal(global_pos.toPoint()))
+        wheel = QWheelEvent(local, global_pos, QPoint(), QPoint(0, 12), Qt.NoButton,
+                            Qt.ControlModifier, Qt.NoScrollPhase, False)
+        QApplication.sendEvent(page, wheel)
+        for _ in range(3):
+            app.processEvents()
+        expected = old_zoom * 1.1 ** 0.1
+        assert win.zoom == old_zoom and abs(win._preview_target_zoom - expected) < 1e-9
+        assert win.zoom_preview.isVisible() and page.img is cached_image
+        QTest.qWait(150)
+        for _ in range(3):
+            app.processEvents()
+        assert abs(win.zoom - expected) < 1e-9 and not win.zoom_preview.isVisible()
+        assert page.img is not cached_image
+        anchored = QPointF(100 / old_zoom * win.zoom, 100 / old_zoom * win.zoom).toPoint()
+        actual = win.scroll.viewport().mapFromGlobal(page.mapToGlobal(anchored))
+        assert (QPointF(actual) - viewport_pos).manhattanLength() <= 4, (actual, viewport_pos)
+
+        # Screen pinch previews without layout work or scrolling, then commits once.
+        pinch_center = QPointF(140, 120)
+        base_zoom = win.zoom
+        old_scroll = (win.scroll.horizontalScrollBar().value(), win.scroll.verticalScrollBar().value())
+        page.pen_input = "pen"
+        page.pts = [QPointF(10, 10), QPointF(20, 20)]
+        win.background_pan.target = win.scroll.widget()
+        win.background_pan.touch_id = 9
+        win.begin_pinch(pinch_center)
+        assert page.pen_input is None and not page.pts and win.background_pan.touch_id is None
+        win.update_pinch(1.15, pinch_center)
+        assert win.zoom == base_zoom and abs(win._preview_target_zoom - base_zoom * 1.15) < 1e-9
+        assert old_scroll == (win.scroll.horizontalScrollBar().value(), win.scroll.verticalScrollBar().value())
+        win.end_pinch()
+        for _ in range(4):
+            app.processEvents()
+        assert abs(win.zoom - base_zoom * 1.15) < 1e-9 and win._pinch_start_zoom is None
+
+        win.set_zoom(99)
+        assert win.zoom == 5.0
+        win.set_zoom(0.01)
+        assert win.zoom == 0.3
+        win.set_zoom(base_zoom)
+        for _ in range(3):
+            app.processEvents()
         win.set_tool("pen")
         point = QPoint(round(150 * win.zoom), round(100 * win.zoom))
 
@@ -184,6 +236,21 @@ def main():
         assert win.background_pan.touch_id is None and win.undo.index() == before + 1
         assert win.scroll.verticalScrollBar().value() == page_scroll, (
             page_scroll, win.scroll.verticalScrollBar().value())
+
+        # Two touchscreen points are consumed by zoom and never reach scrolling/drawing.
+        pinch_zoom = win.zoom
+        pinch_scroll = (win.scroll.horizontalScrollBar().value(), win.scroll.verticalScrollBar().value())
+        before = win.undo.index()
+        sequence = QTest.touchEvent(other, touch, False)
+        sequence.press(10, QPoint(140, 120), other).press(11, QPoint(240, 120), other).commit()
+        sequence.move(10, QPoint(120, 120), other).move(11, QPoint(260, 120), other).commit()
+        assert win._touch_pinch_consuming and win._preview_target_zoom > pinch_zoom
+        assert pinch_scroll == (win.scroll.horizontalScrollBar().value(), win.scroll.verticalScrollBar().value())
+        assert win.undo.index() == before
+        sequence.release(10, QPoint(120, 120), other).release(11, QPoint(260, 120), other).commit()
+        for _ in range(4):
+            app.processEvents()
+        assert not win._touch_pinch_consuming and win.zoom > pinch_zoom
 
         # A touch starting in the page gap scrolls in both directions, even after
         # crossing onto a page. Ending the touch clears the gesture state.

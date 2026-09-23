@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRectF, QPointF, QSettings, QSize, QTimer
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
                            QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QTextCursor,
                            QUndoCommand, QUndoStack)
 from PySide6.QtSvg import QSvgRenderer
@@ -537,10 +537,13 @@ class BackgroundPan(QObject):
         self.last_pos = None
 
     def set_canvas(self, canvas):
-        self.target = self.touch_id = self.last_pos = None
+        self.cancel()
         self.canvas = canvas
         canvas.setAttribute(Qt.WA_AcceptTouchEvents)
         canvas.installEventFilter(self)
+
+    def cancel(self):
+        self.target = self.touch_id = self.last_pos = None
 
     def on_page(self, global_pos):
         if self.canvas is None:
@@ -561,6 +564,9 @@ class BackgroundPan(QObject):
             if self.touch_id is not None or device is None or device.type() != QInputDevice.DeviceType.TouchScreen:
                 return False
             points = e.points()
+            if len(points) > 1:
+                e.ignore()
+                return False
             if not points or self.on_page(points[0].globalPosition()):
                 e.ignore()
                 return False
@@ -572,8 +578,12 @@ class BackgroundPan(QObject):
         if self.touch_id is None or obj is not self.target:
             e.ignore()
             return False
+        if len(e.points()) > 1:
+            self.cancel()
+            e.ignore()
+            return False
         if kind == QEvent.TouchCancel:
-            self.target = self.touch_id = self.last_pos = None
+            self.cancel()
             e.accept()
             return True
         point = next((p for p in e.points() if p.id() == self.touch_id), None)
@@ -585,12 +595,50 @@ class BackgroundPan(QObject):
             vbar.setValue(vbar.value() - round(delta.y()))
             self.last_pos = pos
         if kind == QEvent.TouchEnd:
-            self.target = self.touch_id = self.last_pos = None
+            self.cancel()
         elif point is None and e.points():
             self.touch_id = e.points()[0].id()
             self.last_pos = e.points()[0].globalPosition()
         e.accept()
         return True
+
+
+class ZoomPreview(QWidget):
+    """확대 중 현재 화면만 변형해 PDF 재렌더와 전체 레이아웃 변경을 피한다."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.pixmap = None
+        self.scale = 1.0
+        self.start_center = QPointF()
+        self.current_center = QPointF()
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def start(self, center):
+        self.hide()
+        self.setGeometry(self.parentWidget().rect())
+        self.pixmap = self.parentWidget().grab()
+        self.scale = 1.0
+        self.start_center = self.current_center = QPointF(center)
+        self.raise_()
+        self.show()
+
+    def transform(self, scale, center):
+        self.scale = scale
+        self.current_center = QPointF(center)
+        self.update()
+
+    def paintEvent(self, _event):
+        if self.pixmap is None:
+            return
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self.parentWidget().palette().window())
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.translate(self.current_center)
+        painter.scale(self.scale, self.scale)
+        painter.translate(-self.start_center)
+        painter.drawPixmap(0, 0, self.pixmap)
 
 
 # ---------- 페이지 위젯 ----------
@@ -942,12 +990,6 @@ class PageWidget(QWidget):
         elif self.hl_points and e.button() == Qt.LeftButton:
             self.finish_highlight(e.position())
 
-    def wheelEvent(self, e):
-        if e.modifiers() & Qt.ControlModifier:
-            self.win.set_zoom(self.win.zoom * (1.1 if e.angleDelta().y() > 0 else 1 / 1.1))
-        else:
-            e.ignore()
-
     def contextMenuEvent(self, e):
         win, pno = self.win, self.pno
         if win.tool == "pen" or win.temporary_eraser:
@@ -1038,6 +1080,13 @@ class Win(QMainWindow):
         self.doc, self.path, self.pages = None, None, []
         self._document_generation = 0
         self._zoom_generation = 0
+        self._pinch_start_zoom = None
+        self._touch_pinch_distance = None
+        self._touch_pinch_consuming = False
+        self._preview_base_zoom = None
+        self._preview_target_zoom = None
+        self._preview_anchor = None
+        self._preview_center = None
         self._restoring_page = False
         self._last_seen_page = None
         self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
@@ -1113,8 +1162,15 @@ class Win(QMainWindow):
         self.background_pan = BackgroundPan(self)
         self.scroll.viewport().setAttribute(Qt.WA_AcceptTouchEvents)
         self.scroll.viewport().installEventFilter(self.background_pan)
+        self.register_zoom_input(self.scroll.viewport())
         self.scroll.verticalScrollBar().valueChanged.connect(self.update_page_label)
         self.setCentralWidget(self.scroll)
+
+        self.zoom_preview = ZoomPreview(self.scroll.viewport())
+        self.zoom_commit_timer = QTimer(self)
+        self.zoom_commit_timer.setSingleShot(True)
+        self.zoom_commit_timer.setInterval(100)
+        self.zoom_commit_timer.timeout.connect(self.commit_zoom_preview)
 
         self.scroll_page_indicator = QLabel("", self.scroll.viewport())
         self.scroll_page_indicator.setObjectName("scrollPageIndicator")
@@ -1322,16 +1378,160 @@ class Win(QMainWindow):
         layout.addStretch()
         return body
 
+    # --- 확대 입력 ---
+    def register_zoom_input(self, widget):
+        widget.setAttribute(Qt.WA_AcceptTouchEvents)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, e):
+        kind = e.type()
+        if hasattr(self, "thumbs") and obj is self.thumbs.viewport() and kind == QEvent.Resize:
+            self.schedule_thumbnail_refit()
+        if kind == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
+            delta = e.angleDelta().y() or e.pixelDelta().y()
+            if delta:
+                anchor = QPointF(self.scroll.viewport().mapFromGlobal(e.globalPosition().toPoint()))
+                self.zoom_preview_by(1.1 ** (delta / 120), anchor)
+            e.accept()
+            return True
+        if kind in (QEvent.TouchBegin, QEvent.TouchUpdate, QEvent.TouchEnd, QEvent.TouchCancel):
+            active = [point for point in e.points() if point.state() != QEventPoint.Released]
+            if len(active) >= 2:
+                first, second = active[:2]
+                start = first.globalPosition()
+                end = second.globalPosition()
+                distance = ((end.x() - start.x()) ** 2 + (end.y() - start.y()) ** 2) ** 0.5
+                center_global = QPointF((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
+                center = QPointF(self.scroll.viewport().mapFromGlobal(center_global.toPoint()))
+                if not self._touch_pinch_consuming:
+                    self._touch_pinch_consuming = True
+                    self._touch_pinch_distance = max(1.0, distance)
+                    self.begin_pinch(center)
+                self.update_pinch(distance / self._touch_pinch_distance, center)
+                e.accept()
+                return True
+            if self._touch_pinch_consuming:
+                if self._pinch_start_zoom is not None:
+                    self.end_pinch()
+                if kind in (QEvent.TouchEnd, QEvent.TouchCancel):
+                    self._touch_pinch_consuming = False
+                    self._touch_pinch_distance = None
+                e.accept()
+                return True
+        return super().eventFilter(obj, e)
+
+    def begin_pinch(self, center):
+        if self._preview_base_zoom is not None:
+            self.cancel_zoom_preview()
+        self.background_pan.cancel()
+        self.cancel_page_interaction()
+        self._pinch_start_zoom = self.zoom
+        self.start_zoom_preview(center)
+
+    def update_pinch(self, total_scale, center):
+        if self._pinch_start_zoom is None:
+            self.begin_pinch(center)
+        self.update_zoom_preview(self._pinch_start_zoom * total_scale, center)
+
+    def end_pinch(self):
+        self._pinch_start_zoom = None
+        self.commit_zoom_preview()
+
+    def start_zoom_preview(self, center):
+        if self._preview_base_zoom is not None:
+            return
+        self._preview_base_zoom = self.zoom
+        self._preview_target_zoom = self.zoom
+        self._preview_anchor = self.capture_zoom_anchor(center)
+        self._preview_center = QPointF(center)
+        self.zoom_preview.start(center)
+
+    def update_zoom_preview(self, target_zoom, center):
+        if self._preview_base_zoom is None:
+            self.start_zoom_preview(center)
+        self._preview_target_zoom = max(0.3, min(5.0, target_zoom))
+        self._preview_center = QPointF(center)
+        self.zoom_preview.transform(self._preview_target_zoom / self._preview_base_zoom, center)
+        self.zoom_act.setText(f"{self._preview_target_zoom * 100:.0f}%")
+
+    def zoom_preview_by(self, factor, center):
+        if self._preview_base_zoom is None:
+            self.start_zoom_preview(center)
+        self.update_zoom_preview(self._preview_target_zoom * factor, center)
+        self.zoom_commit_timer.start()
+
+    def cancel_zoom_preview(self):
+        self.zoom_commit_timer.stop()
+        self.zoom_preview.hide()
+        self._preview_base_zoom = None
+        self._preview_target_zoom = None
+        self._preview_anchor = None
+        self._preview_center = None
+
+    def commit_zoom_preview(self):
+        if self._preview_base_zoom is None:
+            return
+        target = self._preview_target_zoom
+        anchor = self._preview_center
+        anchor_ref = self._preview_anchor
+        self.zoom_commit_timer.stop()
+        self._preview_base_zoom = None
+        self._preview_target_zoom = None
+        self._preview_anchor = None
+        self._preview_center = None
+        self.set_zoom(target, anchor=anchor, anchor_ref=anchor_ref)
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, self.zoom_preview.hide))
+
+    def cancel_page_interaction(self):
+        for pw in self.pages:
+            for xref in pw.erased or []:
+                set_hidden(pw.page, xref, False)
+            pw.pen_input = None
+            pw.pts = []
+            pw.erased = None
+            pw.erase_previous = None
+            pw.erase_excluded = set()
+            pw.moving = None
+            if pw.hl_points or pw.preview:
+                pw.cancel_highlight()
+            else:
+                pw.update()
+
+    def viewport_center(self):
+        rect = self.scroll.viewport().rect()
+        return QPointF(rect.center())
+
+    def capture_zoom_anchor(self, viewport_pos):
+        if not self.pages:
+            return None
+        global_pos = self.scroll.viewport().mapToGlobal(viewport_pos.toPoint())
+        pno = self.current_page()
+        for pw in self.pages:
+            if pw.rect().contains(pw.mapFromGlobal(global_pos)):
+                pno = pw.pno
+                break
+        local = self.pages[pno].mapFromGlobal(global_pos)
+        return pno, QPointF(local.x() / self.zoom, local.y() / self.zoom)
+
+    def restore_zoom_anchor(self, anchor_ref, viewport_pos):
+        if anchor_ref is None or not self.pages:
+            return
+        pno, pdf_pos = anchor_ref
+        if not 0 <= pno < len(self.pages):
+            return
+        point = QPointF(pdf_pos.x() * self.zoom, pdf_pos.y() * self.zoom).toPoint()
+        viewport = self.scroll.viewport()
+        current = viewport.mapFromGlobal(self.pages[pno].mapToGlobal(point))
+        hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
+        hbar.setValue(hbar.value() + round(current.x() - viewport_pos.x()))
+        vbar.setValue(vbar.value() + round(current.y() - viewport_pos.y()))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.schedule_refit()
+        self.zoom_preview.setGeometry(self.scroll.viewport().rect())
         if self.scroll_page_indicator.isVisible():
             self.position_scroll_page_indicator()
-
-    def eventFilter(self, obj, event):
-        if obj is self.thumbs.viewport() and event.type() == QEvent.Resize:
-            self.schedule_thumbnail_refit()
-        return super().eventFilter(obj, event)
 
     def schedule_refit(self):
         if self.fit_mode and self.pages:
@@ -1373,8 +1573,10 @@ class Win(QMainWindow):
         self.pages = [PageWidget(self, i) for i in range(len(self.doc))]
         for pw in self.pages:
             lay.addWidget(pw)
+            self.register_zoom_input(pw)
         self.scroll.setWidget(box)
         self.background_pan.set_canvas(box)
+        self.register_zoom_input(box)
         self.thumbs.clear()
         for i in range(len(self.doc)):
             self.thumbs.addItem(QListWidgetItem(str(i + 1)))
@@ -1544,25 +1746,34 @@ class Win(QMainWindow):
             self.thumbs.scrollToItem(current)
 
     # --- 편집 ---
-    def set_zoom(self, z, fit=False):
+    def set_zoom(self, z, fit=False, anchor=None, anchor_ref=None):
+        if self._preview_base_zoom is not None:
+            self.cancel_zoom_preview()
         pno = self._last_seen_page if self._restoring_page else self.current_page()
         generation = self._document_generation
         self._zoom_generation += 1
         zoom_generation = self._zoom_generation
+        if anchor is None:
+            anchor = self.viewport_center()
+        if anchor_ref is None:
+            anchor_ref = self.capture_zoom_anchor(anchor)
         self.fit_mode = fit
         self.zoom = max(0.3, min(5.0, z))
         for pw in self.pages:
             pw.invalidate(thumb=False)
         self.zoom_act.setText(f"{self.zoom * 100:.0f}%")
+
         def finish_zoom():
             if generation != self._document_generation or zoom_generation != self._zoom_generation:
                 return
-            self.goto_page(pno)
             if self._restoring_page:
+                self.goto_page(pno)
                 self._restoring_page = False
                 self.update_page_label()
                 self.scroll_page_timer.stop()
                 self.scroll_page_indicator.hide()
+            else:
+                self.restore_zoom_anchor(anchor_ref, anchor)
         # QScrollArea의 크기 조정과 페이지 레이아웃이 끝난 다음 위치를 복원한다.
         QTimer.singleShot(0, lambda: QTimer.singleShot(0, finish_zoom))
 
