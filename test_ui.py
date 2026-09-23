@@ -58,8 +58,8 @@ def main():
         bar.initStyleOption(option)
         handle = bar.style().subControlRect(
             QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarSlider, bar)
-        handle_left = bar.mapTo(win.scroll.viewport(), handle.topLeft()).x()
-        assert 0 <= indicator.x() and indicator.geometry().right() < handle_left
+        assert indicator.x() + indicator.width() == win.scroll.viewport().width() - 4
+        assert abs(indicator.geometry().center().y() - handle.center().y()) <= 1
         assert indicator.geometry().bottom() < win.scroll.viewport().height()
 
         QTest.qWait(400)

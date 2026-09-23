@@ -1472,13 +1472,10 @@ class Win(QMainWindow):
         bar.initStyleOption(option)
         handle = bar.style().subControlRect(
             QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarSlider, bar)
-        handle_top_left = bar.mapTo(viewport, handle.topLeft())
-        handle_center = bar.mapTo(viewport, handle.center())
         label = self.scroll_page_indicator
         label.adjustSize()
-        x = max(0, min(handle_top_left.x() - label.width() - 8,
-                       viewport.width() - label.width()))
-        y = max(0, min(handle_center.y() - label.height() // 2,
+        x = max(0, viewport.width() - label.width() - 4)
+        y = max(0, min(handle.center().y() - label.height() // 2,
                        viewport.height() - label.height()))
         label.move(x, y)
 
