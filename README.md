@@ -38,6 +38,7 @@
 | S펜 버튼 | 누른 동안 임시 지우개, 놓으면 이전 도구로 복귀 |
 | `Ctrl+Enter` · `Esc` | 텍스트 입력 확정 · 취소 (`Enter`는 줄바꿈) |
 | `Ctrl+Z` · `Ctrl+Y` | 실행 취소 · 다시 실행 |
+| `Ctrl+F` | PDF 본문 검색. `Enter` · `Shift+Enter`로 다음 · 이전 결과 이동 |
 | 화면 두 손가락 핀치 · 터치패드 `Ctrl+휠` · `Ctrl++` · `Ctrl+-` | 부드러운 확대 · 축소 |
 | `Ctrl+O` · `Ctrl+S` · `Ctrl+Shift+S` | 열기 · 저장 · 다른 이름으로 저장 |
 

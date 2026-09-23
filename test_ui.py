@@ -26,9 +26,12 @@ def main():
         settings.setValue("theme", "파스텔")
         path = Path(directory) / "workspace.pdf"
         doc = pymupdf.open()
-        doc.new_page(width=595, height=842)
+        first = doc.new_page(width=595, height=842)
+        first.insert_text((72, 72), "search target")
+        first.add_freetext_annot((300, 100, 430, 130), "annotation target")
         doc.new_page(width=842, height=595)
-        doc.new_page(width=420, height=842)
+        last = doc.new_page(width=420, height=842)
+        last.insert_text((72, 72), "search target")
         doc.save(path)
         doc.close()
 
@@ -81,6 +84,35 @@ def main():
         for action in (win.open_act, win.save_act, *win.tool_group.actions()):
             assert win.tb.widgetForAction(action).isVisible(), action.text()
 
+        QTest.keyClick(win, Qt.Key_F, Qt.ControlModifier)
+        settle(app)
+        assert win.search_bar.isVisible() and win.search_edit.hasFocus()
+        win.search_edit.setText("search target")
+        settle(app)
+        assert len(win.search_results) == 2 and win.search_count.text() == "1 / 2"
+        assert len(win.pages[0].search_hits) == 1 and len(win.pages[2].search_hits) == 1
+        QTest.keyClick(win.search_edit, Qt.Key_Return)
+        settle(app)
+        assert win.search_count.text() == "2 / 2" and win.current_page() == 2
+        QTest.keyClick(win.search_edit, Qt.Key_Return)
+        settle(app)
+        assert win.search_count.text() == "1 / 2" and win.current_page() == 0
+        QTest.keyClick(win.search_edit, Qt.Key_Return, Qt.ShiftModifier)
+        settle(app)
+        assert win.search_count.text() == "2 / 2" and win.current_page() == 2
+        win.search_edit.setText("missing")
+        assert not win.search_results and win.search_count.text() == "0 / 0"
+        assert not win.search_prev.isEnabled() and not win.search_next.isEnabled()
+        win.search_edit.setText("annotation target")
+        assert not win.search_results
+        win.search_edit.setText("search target")
+        QTest.keyClick(win.search_edit, Qt.Key_Escape)
+        settle(app)
+        assert not win.search_bar.isVisible() and not win.search_results
+        assert all(not page.search_hits for page in win.pages)
+        win.goto_page(0)
+        settle(app)
+
         win.goto_page(1)
         settle(app)
         indicator = win.scroll_page_indicator
@@ -117,6 +149,7 @@ def main():
         assert not win.width_section.isVisible()
         win.font_spin.setValue(26)
         assert win.font_size == 26
+
         win.set_tool(None)
         assert not win.color_section.isVisible() and not win.width_section.isVisible()
 
@@ -143,6 +176,7 @@ def main():
         doc.close()
         win.open(str(single))
         settle(app)
+        assert not win.search_bar.isVisible() and not win.search_edit.text() and not win.search_results
         win.scroll.verticalScrollBar().setValue(win.scroll.verticalScrollBar().maximum())
         settle(app)
         assert not win.scroll_page_indicator.isVisible()

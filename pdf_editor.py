@@ -21,7 +21,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QF
                            QUndoCommand, QUndoStack)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
+                               QLineEdit, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
                                QStyle, QStyleOptionSlider, QTextEdit, QToolBar, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
@@ -172,9 +172,14 @@ QListWidget { background: %(dock)s; border: none; outline: none; }
 QListWidget::item { color: %(list_text)s; border: 2px solid transparent; border-radius: 5px; padding: 4px; }
 QListWidget::item:selected { color: %(list_selected_text)s; background: %(list_selected_bg)s; border-color: %(accent)s; }
 QScrollArea { border: none; background: %(window)s; }
-QSpinBox { background: %(input)s; color: %(input_text)s; border: 1px solid %(input_border)s;
+QSpinBox, QLineEdit { background: %(input)s; color: %(input_text)s; border: 1px solid %(input_border)s;
     border-radius: 5px; padding: 4px 7px; selection-background-color: %(accent_border)s; }
-QSpinBox:focus { border-color: %(accent)s; }
+QSpinBox:focus, QLineEdit:focus { border-color: %(accent)s; }
+QWidget#searchBar { background: %(chrome)s; border-bottom: 1px solid %(border)s; }
+QWidget#searchBar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px;
+    color: %(text)s; padding: 4px 8px; }
+QWidget#searchBar QToolButton:hover { background: %(hover)s; }
+QWidget#searchBar QToolButton:disabled { color: %(disabled)s; }
 QMenu { background: %(menu)s; color: %(menu_text)s; border: 1px solid %(input_border)s; padding: 4px; }
 QMenu::item { padding: 6px 26px 6px 24px; }
 QMenu::item:selected { background: %(menu_selected)s; }
@@ -658,6 +663,7 @@ class PageWidget(QWidget):
         self.erase_previous = None
         self.erase_excluded = set()
         self.pen_input = None  # 펜촉이 닿아 있는 동안의 실제 동작: pen / erase
+        self.search_hits = []
         self.tool_cursor = Qt.ArrowCursor
         self.tip_xref = None
         self.setMouseTracking(True)
@@ -712,6 +718,14 @@ class PageWidget(QWidget):
         p.setPen(QPen(QColor(theme["page_border"]), 1))
         p.drawRect(paper.adjusted(0, 0, -1, -1))
         p.setRenderHint(QPainter.Antialiasing)
+        active = self.win.search_results[self.win.search_index] if self.win.search_index >= 0 else None
+        for rect in self.search_hits:
+            current = active == (self.pno, rect)
+            fill = QColor("#ff9800" if current else "#ffeb3b")
+            fill.setAlpha(135 if current else 85)
+            p.setPen(QPen(QColor("#ef6c00"), 2) if current else Qt.NoPen)
+            p.setBrush(fill)
+            p.drawRect(self.to_widget(rect))
         # 메모 표식: 내용 있는 형광펜/펜 주석 우상단에 말풍선
         page = self.page
         for a in page.annots():
@@ -1089,6 +1103,8 @@ class Win(QMainWindow):
         self._preview_center = None
         self._restoring_page = False
         self._last_seen_page = None
+        self.search_results = []
+        self.search_index = -1
         self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
         self.fit_mode = False
         self.hl_width = DEFAULT_HIGHLIGHT_WIDTH
@@ -1158,13 +1174,59 @@ class Win(QMainWindow):
             button.setToolButtonStyle(Qt.ToolButtonIconOnly)
             button.setToolTip("실행 취소" if icon == "undo" else "다시 실행")
 
+        self.search_bar = QWidget()
+        self.search_bar.setObjectName("searchBar")
+        search_layout = QHBoxLayout(self.search_bar)
+        search_layout.setContentsMargins(10, 6, 10, 6)
+        search_layout.setSpacing(5)
+        search_layout.addStretch()
+        search_layout.addWidget(QLabel("찾기"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("PDF 본문 검색")
+        self.search_edit.setFixedWidth(280)
+        self.search_edit.textChanged.connect(self.search_text)
+        self.search_edit.installEventFilter(self)
+        search_layout.addWidget(self.search_edit)
+        self.search_count = QLabel("0 / 0")
+        self.search_count.setMinimumWidth(58)
+        self.search_count.setAlignment(Qt.AlignCenter)
+        search_layout.addWidget(self.search_count)
+        self.search_prev = QToolButton()
+        self.search_prev.setText("↑")
+        self.search_prev.setToolTip("이전 결과 (Shift+Enter)")
+        self.search_prev.clicked.connect(lambda: self.move_search(-1))
+        search_layout.addWidget(self.search_prev)
+        self.search_next = QToolButton()
+        self.search_next.setText("↓")
+        self.search_next.setToolTip("다음 결과 (Enter)")
+        self.search_next.clicked.connect(lambda: self.move_search(1))
+        search_layout.addWidget(self.search_next)
+        search_close = QToolButton()
+        self.set_themed_icon(search_close, "close", "close_icon")
+        search_close.setToolTip("검색 닫기 (Esc)")
+        search_close.clicked.connect(self.hide_search)
+        search_layout.addWidget(search_close)
+        self.search_bar.hide()
+        self.search_prev.setEnabled(False)
+        self.search_next.setEnabled(False)
+
+        self.find_act = QAction("찾기", self, shortcut=QKeySequence.Find)
+        self.find_act.triggered.connect(self.show_search)
+        self.addAction(self.find_act)
+
         self.scroll = QScrollArea(widgetResizable=True)
         self.background_pan = BackgroundPan(self)
         self.scroll.viewport().setAttribute(Qt.WA_AcceptTouchEvents)
         self.scroll.viewport().installEventFilter(self.background_pan)
         self.register_zoom_input(self.scroll.viewport())
         self.scroll.verticalScrollBar().valueChanged.connect(self.update_page_label)
-        self.setCentralWidget(self.scroll)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.search_bar)
+        central_layout.addWidget(self.scroll)
+        self.setCentralWidget(central)
 
         self.zoom_preview = ZoomPreview(self.scroll.viewport())
         self.zoom_commit_timer = QTimer(self)
@@ -1378,6 +1440,70 @@ class Win(QMainWindow):
         layout.addStretch()
         return body
 
+    # --- 검색 ---
+    def show_search(self):
+        self.search_bar.show()
+        if self.search_edit.text() and not self.search_results:
+            self.search_text(self.search_edit.text())
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def hide_search(self):
+        self.search_bar.hide()
+        self.clear_search_results()
+        self.scroll.setFocus()
+
+    def clear_search_results(self):
+        self.search_results = []
+        self.search_index = -1
+        self.search_count.setText("0 / 0")
+        self.search_prev.setEnabled(False)
+        self.search_next.setEnabled(False)
+        for page in self.pages:
+            page.search_hits = []
+            page.update()
+
+    def reset_search(self):
+        self.hide_search()
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
+
+    def search_text(self, text):
+        start_page = self.current_page() if self.pages else 0
+        self.clear_search_results()
+        query = text.strip()
+        if not self.doc or not query:
+            return
+        for pno, page in enumerate(self.doc):
+            textpage = pymupdf.TextPage(page.get_displaylist(annots=0).get_textpage(pymupdf.TEXTFLAGS_SEARCH))
+            hits = textpage.search(query, quads=0)
+            self.pages[pno].search_hits = hits
+            self.search_results.extend((pno, rect) for rect in hits)
+        if not self.search_results:
+            return
+        self.search_index = next((i for i, result in enumerate(self.search_results)
+                                  if result[0] >= start_page), 0)
+        self.search_prev.setEnabled(True)
+        self.search_next.setEnabled(True)
+        self.show_search_result()
+
+    def move_search(self, step):
+        if self.search_results:
+            self.search_index = (self.search_index + step) % len(self.search_results)
+            self.show_search_result()
+
+    def show_search_result(self):
+        self.search_count.setText(f"{self.search_index + 1} / {len(self.search_results)}")
+        for page in self.pages:
+            page.update()
+        pno, rect = self.search_results[self.search_index]
+        page = self.pages[pno]
+        center = page.to_widget(rect).center()
+        viewport = self.scroll.viewport()
+        self.scroll.horizontalScrollBar().setValue(round(page.x() + center.x() - viewport.width() / 2))
+        self.scroll.verticalScrollBar().setValue(round(page.y() + center.y() - viewport.height() / 2))
+
     # --- 확대 입력 ---
     def register_zoom_input(self, widget):
         widget.setAttribute(Qt.WA_AcceptTouchEvents)
@@ -1385,6 +1511,13 @@ class Win(QMainWindow):
 
     def eventFilter(self, obj, e):
         kind = e.type()
+        if obj is self.search_edit and kind == QEvent.KeyPress:
+            if e.key() == Qt.Key_Escape:
+                self.hide_search()
+                return True
+            if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.move_search(-1 if e.modifiers() & Qt.ShiftModifier else 1)
+                return True
         if hasattr(self, "thumbs") and obj is self.thumbs.viewport() and kind == QEvent.Resize:
             self.schedule_thumbnail_refit()
         if kind == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
@@ -1553,6 +1686,7 @@ class Win(QMainWindow):
     def open(self, path):
         # 파일을 메모리로 읽어 열기: 파일 잠금 없음, 같은 경로에 그대로 저장 가능.
         new_doc = pymupdf.open(stream=Path(path).read_bytes(), filetype="pdf")
+        self.reset_search()
         self.remember_current_page()
         self.doc = new_doc
         self.path = path
