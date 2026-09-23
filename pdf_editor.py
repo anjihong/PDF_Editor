@@ -21,7 +21,8 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontDatabase, 
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
-                               QTextEdit, QToolBar, QToolButton, QToolTip, QVBoxLayout, QWidget)
+                               QStyle, QStyleOptionSlider, QTextEdit, QToolBar, QToolButton, QToolTip,
+                               QVBoxLayout, QWidget)
 
 HIDDEN = pymupdf.PDF_ANNOT_IS_HIDDEN
 ERASER_RADIUS_PX = 8
@@ -138,62 +139,101 @@ def rgb(hex_color):
     return (c.redF(), c.greenF(), c.blueF())
 THUMB_ZOOM = 0.2
 
-QSS = """
-QMainWindow, QDialog { background: #20272d; color: #e8edef; }
-QWidget { color: #e8edef; font-family: "Malgun Gothic"; font-size: 10pt; }
-QLabel { color: #e8edef; background: transparent; }
-QMenuBar, QToolBar, QStatusBar { background: #20272d; color: #e8edef; }
-QMenuBar { border-bottom: 1px solid #364149; padding: 2px 6px; }
+def theme_qss(c):
+    return """
+QMainWindow, QDialog { background: %(window)s; color: %(text)s; }
+QWidget { color: %(text)s; font-family: "Malgun Gothic"; font-size: 10pt; }
+QLabel { color: %(text)s; background: transparent; }
+QMenuBar, QToolBar, QStatusBar { background: %(chrome)s; color: %(text)s; }
+QMenuBar { border-bottom: 1px solid %(border)s; padding: 2px 6px; }
 QMenuBar::item { padding: 4px 10px; border-radius: 4px; }
-QMenuBar::item:selected { background: #354249; }
-QToolBar { border: none; border-bottom: 1px solid #364149; padding: 5px 10px; spacing: 3px; }
+QMenuBar::item:selected { background: %(hover)s; }
+QToolBar { border: none; border-bottom: 1px solid %(border)s; padding: 5px 10px; spacing: 3px; }
 QToolBar QToolButton, QStatusBar QToolButton, QWidget#dockHeader QToolButton {
     background: transparent; border: 1px solid transparent; border-radius: 5px;
-    color: #e8edef; padding: 5px 8px; }
-QToolBar QToolButton:hover, QStatusBar QToolButton:hover, QWidget#dockHeader QToolButton:hover { background: #354249; }
+    color: %(text)s; padding: 5px 8px; }
+QToolBar QToolButton:hover, QStatusBar QToolButton:hover, QWidget#dockHeader QToolButton:hover { background: %(hover)s; }
 QToolBar QToolButton:checked, QToolBar QToolButton:pressed, QStatusBar QToolButton:pressed {
-    background: #244b4e; color: #75e1d5; border-color: #287f79; }
-QToolBar QToolButton:disabled, QStatusBar QToolButton:disabled { color: #73818a; }
-QToolBar::separator { width: 1px; background: #465158; margin: 5px 8px; }
-QStatusBar { border-top: 1px solid #364149; min-height: 30px; }
-QStatusBar QLabel { color: #aebbc1; }
-QDockWidget { background: #273139; border: 0; }
-QWidget#dockHeader { background: #29343c; border-bottom: 1px solid #3b4850; }
-QWidget#dockHeader QLabel { color: #e8edef; font-weight: 600; }
-QWidget#propertyBody { background: #273139; }
-QLabel#propertyTitle { font-size: 13pt; font-weight: 600; color: #f3f6f6; }
-QLabel#propertyHint { color: #aebbc1; line-height: 1.3; }
-QLabel#propertyLabel { color: #b8c4c9; font-weight: 600; }
-QListWidget { background: #273139; border: none; outline: none; }
-QListWidget::item { color: #b9c5ca; border: 2px solid transparent; border-radius: 5px; padding: 4px; }
-QListWidget::item:selected { color: #f3f8f8; background: #314449; border-color: #25a89a; }
-QScrollArea { border: none; background: #20272d; }
-QSpinBox { background: #1e282e; color: #f0f4f5; border: 1px solid #4b5b63;
-    border-radius: 5px; padding: 4px 7px; selection-background-color: #287f79; }
-QSpinBox:focus { border-color: #25a89a; }
-QMenu { background: #2c373f; color: #edf2f3; border: 1px solid #4b5b63; padding: 4px; }
+    background: %(selected_bg)s; color: %(accent_text)s; border-color: %(accent_border)s; }
+QToolBar QToolButton:disabled, QStatusBar QToolButton:disabled { color: %(disabled)s; }
+QToolBar::separator { width: 1px; background: %(separator)s; margin: 5px 8px; }
+QStatusBar { border-top: 1px solid %(border)s; min-height: 30px; }
+QStatusBar QLabel { color: %(muted)s; }
+QDockWidget { background: %(dock)s; border: 0; }
+QWidget#dockHeader { background: %(dock_header)s; border-bottom: 1px solid %(dock_border)s; }
+QWidget#dockHeader QLabel { color: %(text)s; font-weight: 600; }
+QWidget#propertyBody { background: %(dock)s; }
+QLabel#propertyTitle { font-size: 13pt; font-weight: 600; color: %(title)s; }
+QLabel#propertyHint { color: %(muted)s; line-height: 1.3; }
+QLabel#propertyLabel { color: %(label)s; font-weight: 600; }
+QListWidget { background: %(dock)s; border: none; outline: none; }
+QListWidget::item { color: %(list_text)s; border: 2px solid transparent; border-radius: 5px; padding: 4px; }
+QListWidget::item:selected { color: %(list_selected_text)s; background: %(list_selected_bg)s; border-color: %(accent)s; }
+QScrollArea { border: none; background: %(window)s; }
+QSpinBox { background: %(input)s; color: %(input_text)s; border: 1px solid %(input_border)s;
+    border-radius: 5px; padding: 4px 7px; selection-background-color: %(accent_border)s; }
+QSpinBox:focus { border-color: %(accent)s; }
+QMenu { background: %(menu)s; color: %(menu_text)s; border: 1px solid %(input_border)s; padding: 4px; }
 QMenu::item { padding: 6px 26px 6px 24px; }
-QMenu::item:selected { background: #365057; }
-QMenu::item:disabled { color: #839198; }
-QMenu::separator { height: 1px; background: #48565e; margin: 4px 6px; }
-QPushButton, QToolButton#customColor { background: #34434b; color: #edf2f3;
-    border: 1px solid #52636b; border-radius: 5px; padding: 6px 10px; }
-QPushButton:hover, QToolButton#customColor:hover { background: #40535b; border-color: #25a89a; }
-QPushButton:pressed { background: #244b4e; }
-QScrollBar:vertical { background: #263139; width: 11px; margin: 0; }
-QScrollBar:horizontal { background: #263139; height: 11px; margin: 0; }
-QScrollBar::handle { background: #52616a; border-radius: 5px; min-height: 28px; min-width: 28px; }
-QScrollBar::handle:hover { background: #687a83; }
+QMenu::item:selected { background: %(menu_selected)s; }
+QMenu::item:disabled { color: %(menu_disabled)s; }
+QMenu::separator { height: 1px; background: %(menu_separator)s; margin: 4px 6px; }
+QPushButton, QToolButton#customColor { background: %(button)s; color: %(menu_text)s;
+    border: 1px solid %(button_border)s; border-radius: 5px; padding: 6px 10px; }
+QPushButton:hover, QToolButton#customColor:hover { background: %(button_hover)s; border-color: %(accent)s; }
+QPushButton:pressed { background: %(selected_bg)s; }
+QScrollBar:vertical { background: %(scroll_bg)s; width: 11px; margin: 0; }
+QScrollBar:horizontal { background: %(scroll_bg)s; height: 11px; margin: 0; }
+QScrollBar::handle { background: %(scroll_handle)s; border-radius: 5px; min-height: 28px; min-width: 28px; }
+QScrollBar::handle:hover { background: %(scroll_hover)s; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-QToolTip { background: #34434b; color: #f2f5f5; border: 1px solid #64757c; padding: 5px; }
-"""
+QLabel#scrollPageIndicator { background: %(tooltip)s; color: %(tooltip_text)s;
+    border: 1px solid %(tooltip_border)s; border-radius: 6px; padding: 4px 8px; font-weight: 600; }
+QToolTip { background: %(tooltip)s; color: %(tooltip_text)s; border: 1px solid %(tooltip_border)s; padding: 5px; }
+""" % c
 
 ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "assets"   # exe(onefile)는 _MEIPASS에 풀림
 
-THEME = dict(canvas="#20272d", page_border="#b5bec1", shadow=5, shadow_color="#151b1f",
-             marker=("#f7dc87", "#b08338", "#70521e"),
-             note_style="QTextEdit{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}")
+DARK_COLORS = dict(window="#20272d", text="#e8edef", chrome="#20272d", border="#364149",
+                   hover="#354249", selected_bg="#244b4e", accent_text="#75e1d5", accent_border="#287f79",
+                   accent="#25a89a", disabled="#73818a", separator="#465158", muted="#aebbc1",
+                   dock="#273139", dock_header="#29343c", dock_border="#3b4850", title="#f3f6f6",
+                   label="#b8c4c9", list_text="#b9c5ca", list_selected_text="#f3f8f8",
+                   list_selected_bg="#314449", input="#1e282e", input_text="#f0f4f5",
+                   input_border="#4b5b63", menu="#2c373f", menu_text="#edf2f3",
+                   menu_selected="#365057", menu_disabled="#839198", menu_separator="#48565e",
+                   button="#34434b", button_border="#52636b", button_hover="#40535b",
+                   scroll_bg="#263139", scroll_handle="#52616a", scroll_hover="#687a83",
+                   tooltip="#34434b", tooltip_text="#f2f5f5", tooltip_border="#64757c",
+                   icon="#e8edef", close_icon="#aebbc1")
+LIGHT_COLORS = dict(window="#e7ebeb", text="#243139", chrome="#f8faf9", border="#d5dddf",
+                    hover="#e8f0ef", selected_bg="#ddf3f0", accent_text="#137b72", accent_border="#25a89a",
+                    accent="#25a89a", disabled="#a7b1b5", separator="#d7dedf", muted="#66767e",
+                    dock="#f1f4f3", dock_header="#edf1f0", dock_border="#d5dddf", title="#1f2b31",
+                    label="#52636b", list_text="#4a5a62", list_selected_text="#193b3a",
+                    list_selected_bg="#ddf3f0", input="#ffffff", input_text="#243139",
+                    input_border="#c5cfd2", menu="#ffffff", menu_text="#243139",
+                    menu_selected="#e5f2f0", menu_disabled="#9ba6aa", menu_separator="#dce2e3",
+                    button="#f7f9f8", button_border="#c5cfd2", button_hover="#e7f1ef",
+                    scroll_bg="#e3e9e9", scroll_handle="#aebabe", scroll_hover="#8e9da2",
+                    tooltip="#ffffff", tooltip_text="#243139", tooltip_border="#b8c4c7",
+                    icon="#34434b", close_icon="#75858c")
+
+THEMES = {
+    "다크": dict(qss=theme_qss(DARK_COLORS), colors=DARK_COLORS, canvas="#20272d",
+               page_border="#b5bec1", shadow=5, shadow_color="#151b1f", dark_title=True,
+               chrome=("#20272d", "#e8edef", "#364149"),
+               marker=("#f7dc87", "#b08338", "#70521e"),
+               palette=("#20272d", "#e8edef", "#1e282e", "#273139", "#34434b", "#287f79", "#ffffff"),
+               note_style="QTextEdit{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+    "라이트": dict(qss=theme_qss(LIGHT_COLORS), colors=LIGHT_COLORS, canvas="#e7ebeb",
+                page_border="#bcc5c8", shadow=5, shadow_color="#c4ccce", dark_title=False,
+                chrome=("#f8faf9", "#243139", "#d5dddf"),
+                marker=("#f7dc87", "#b08338", "#70521e"),
+                palette=("#f8faf9", "#243139", "#ffffff", "#f1f4f3", "#f7f9f8", "#25a89a", "#ffffff"),
+                note_style="QTextEdit{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+}
 
 # 화면 전체에 같은 굵기의 선형 아이콘을 사용한다. 파일 아이콘과 겹치지 않도록 UI 전용 경로로 둔다.
 UI_ICONS = {
@@ -212,6 +252,8 @@ UI_ICONS = {
     "layout": '<rect x="3" y="3" width="18" height="18" rx="1"/><path d="M9 3v18"/>',
     "panel": '<rect x="3" y="3" width="18" height="18" rx="1"/><path d="M15 3v18"/>',
     "close": '<path d="M5 5l14 14M19 5L5 19"/>',
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>',
+    "moon": '<path d="M20 15.5A8 8 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z"/>',
 }
 
 
@@ -1002,21 +1044,17 @@ class Win(QMainWindow):
         self.undo.cleanChanged.connect(self.on_clean_changed)
         self.setAcceptDrops(True)
         self.resize(1200, 900)
-        self.theme = THEME
+        saved_theme = str(QSettings("pdf-editor", "PdfEditor").value("theme", "다크"))
+        self.theme_name = saved_theme if saved_theme in THEMES else "다크"
+        self.theme = THEMES[self.theme_name]
+        self.icon_targets = []
         # offscreen 실행에서도 Windows의 한글 글꼴을 사용할 수 있도록 등록한다.
         malgun = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "malgun.ttf"
         if sys.platform == "win32" and malgun.exists() and "Malgun Gothic" not in QFontDatabase.families():
             QFontDatabase.addApplicationFont(str(malgun))
-        QApplication.setFont(QFont("Malgun Gothic", 10))
-        QApplication.instance().setStyleSheet(QSS)
-        palette = QApplication.palette()
-        for role, color in ((QPalette.Window, "#20272d"), (QPalette.WindowText, "#e8edef"),
-                            (QPalette.Base, "#1e282e"), (QPalette.AlternateBase, "#273139"),
-                            (QPalette.Text, "#e8edef"), (QPalette.Button, "#34434b"),
-                            (QPalette.ButtonText, "#e8edef"), (QPalette.Highlight, "#287f79"),
-                            (QPalette.HighlightedText, "#ffffff")):
-            palette.setColor(role, QColor(color))
-        QApplication.instance().setPalette(palette)
+        self.base_font = QFont("Malgun Gothic", 10)
+        QApplication.setFont(self.base_font)
+        self.apply_application_theme()
 
         tb = self.tb = QToolBar("도구")
         tb.setMovable(False)
@@ -1026,9 +1064,11 @@ class Win(QMainWindow):
         file_menu = self.menuBar().addMenu("파일")
         view_menu = self.menuBar().addMenu("보기")
 
-        self.open_act = QAction(ui_icon("folder"), "열기", self, shortcut=QKeySequence.Open)
+        self.open_act = QAction("열기", self, shortcut=QKeySequence.Open)
+        self.set_themed_icon(self.open_act, "folder")
         self.open_act.triggered.connect(self.open_dialog)
-        self.save_act = QAction(ui_icon("save"), "저장", self, shortcut=QKeySequence.Save)
+        self.save_act = QAction("저장", self, shortcut=QKeySequence.Save)
+        self.set_themed_icon(self.save_act, "save")
         self.save_act.triggered.connect(self.save)
         self.save_as_act = QAction("다른 이름으로 저장", self, shortcut=QKeySequence.SaveAs)
         self.save_as_act.triggered.connect(self.save_as)
@@ -1040,12 +1080,14 @@ class Win(QMainWindow):
 
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)   # 다시 누르면 꺼짐 = 선택 모드
-        select_act = QAction(ui_icon("cursor"), "선택", self, checkable=True)
+        select_act = QAction("선택", self, checkable=True)
+        self.set_themed_icon(select_act, "cursor")
         select_act.setData(None)
         self.tool_group.addAction(select_act)
         tb.addAction(select_act)
         for i, (name, tool, icon) in enumerate(TOOLS):
-            act = QAction(ui_icon(icon), name, self, checkable=True, shortcut=str(i + 1))
+            act = QAction(name, self, checkable=True, shortcut=str(i + 1))
+            self.set_themed_icon(act, icon)
             act.setData(tool)
             act.setToolTip(f"{name} ({i + 1})")
             self.tool_group.addAction(act)
@@ -1057,7 +1099,7 @@ class Win(QMainWindow):
         for act, key, icon in [(self.undo.createUndoAction(self, "↶"), QKeySequence.Undo, "undo"),
                                (self.undo.createRedoAction(self, "↷"), QKeySequence.Redo, "redo")]:
             act.setShortcuts(key)
-            act.setIcon(ui_icon(icon))
+            self.set_themed_icon(act, icon)
             tb.addAction(act)
             button = tb.widgetForAction(act)
             button.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -1069,6 +1111,16 @@ class Win(QMainWindow):
         self.scroll.viewport().installEventFilter(self.background_pan)
         self.scroll.verticalScrollBar().valueChanged.connect(self.update_page_label)
         self.setCentralWidget(self.scroll)
+
+        self.scroll_page_indicator = QLabel("", self.scroll.viewport())
+        self.scroll_page_indicator.setObjectName("scrollPageIndicator")
+        self.scroll_page_indicator.setAlignment(Qt.AlignCenter)
+        self.scroll_page_indicator.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.scroll_page_indicator.hide()
+        self.scroll_page_timer = QTimer(self)
+        self.scroll_page_timer.setSingleShot(True)
+        self.scroll_page_timer.setInterval(700)
+        self.scroll_page_timer.timeout.connect(self.scroll_page_indicator.hide)
 
         self.thumbs = QListWidget()
         self.thumbs.setViewMode(QListWidget.IconMode)
@@ -1088,20 +1140,34 @@ class Win(QMainWindow):
                                   (self.properties_dock, "속성 패널", "panel")):
             toggle = dock.toggleViewAction()
             toggle.setText(title)
-            toggle.setIcon(ui_icon(icon))
+            self.set_themed_icon(toggle, icon)
             view_menu.addAction(toggle)
         self.resizeDocks([self.pages_dock, self.properties_dock], [205, 240], Qt.Horizontal)
 
-        self.zoom_out_act = QAction(ui_icon("zoom-out"), "축소", self, shortcut=QKeySequence.ZoomOut)
+        self.zoom_out_act = QAction("축소", self, shortcut=QKeySequence.ZoomOut)
+        self.set_themed_icon(self.zoom_out_act, "zoom-out")
         self.zoom_out_act.triggered.connect(lambda: self.set_zoom(self.zoom / 1.2))
         self.zoom_act = QAction("100%", self)
         self.zoom_act.triggered.connect(self.fit_width)
-        self.zoom_in_act = QAction(ui_icon("zoom-in"), "확대", self, shortcut=QKeySequence.ZoomIn)
+        self.zoom_in_act = QAction("확대", self, shortcut=QKeySequence.ZoomIn)
+        self.set_themed_icon(self.zoom_in_act, "zoom-in")
         self.zoom_in_act.triggered.connect(lambda: self.set_zoom(self.zoom * 1.2))
         view_menu.addSeparator()
         view_menu.addAction(self.zoom_out_act)
         view_menu.addAction("너비 맞춤", self.fit_width)
         view_menu.addAction(self.zoom_in_act)
+        view_menu.addSeparator()
+        self.theme_group = QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_actions = {}
+        for name, icon in (("다크", "moon"), ("라이트", "sun")):
+            action = QAction(f"{name} 테마", self, checkable=True)
+            action.setData(name)
+            self.set_themed_icon(action, icon)
+            self.theme_group.addAction(action)
+            self.theme_actions[name] = action
+            view_menu.addAction(action)
+        self.theme_group.triggered.connect(lambda action: self.apply_theme(action.data()))
 
         self.page_spin = QSpinBox(minimum=1, maximum=1)
         self.page_spin.editingFinished.connect(lambda: self.goto_page(self.page_spin.value() - 1))
@@ -1127,13 +1193,38 @@ class Win(QMainWindow):
             zoom_layout.addWidget(button)
         self.statusBar().addPermanentWidget(zoom_controls)
 
-        self.update_swatch()
+        self.theme_toggle_act = QAction(self)
+        self.theme_toggle_act.triggered.connect(self.toggle_theme)
+        self.theme_btn = QToolButton()
+        self.theme_btn.setDefaultAction(self.theme_toggle_act)
+        self.theme_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.theme_btn.setIconSize(QSize(18, 18))
+        self.statusBar().addPermanentWidget(self.theme_btn)
+
+        self.apply_theme(self.theme_name)
         self.update_properties()
         self.setWindowTitle("PDF 편집기[*]")
         if path:
             self.open(path)
         if self.pen_button:
             QApplication.instance().installNativeEventFilter(self.pen_button)
+
+    def set_themed_icon(self, target, icon, color_key="icon"):
+        self.icon_targets.append((target, icon, color_key))
+        target.setIcon(ui_icon(icon, self.theme["colors"][color_key], self.devicePixelRatioF()))
+
+    def apply_application_theme(self):
+        app = QApplication.instance()
+        app.setStyleSheet(self.theme["qss"])
+        window, text, base, alternate, button, highlight, highlighted = self.theme["palette"]
+        palette = QPalette()
+        for role, color in ((QPalette.Window, window), (QPalette.WindowText, text),
+                            (QPalette.Base, base), (QPalette.AlternateBase, alternate),
+                            (QPalette.Text, text), (QPalette.Button, button),
+                            (QPalette.ButtonText, text), (QPalette.Highlight, highlight),
+                            (QPalette.HighlightedText, highlighted)):
+            palette.setColor(role, QColor(color))
+        app.setPalette(palette)
 
     def make_dock(self, title, content, side, min_width):
         dock = QDockWidget(title, self)
@@ -1147,7 +1238,7 @@ class Win(QMainWindow):
         layout.addWidget(QLabel(title))
         layout.addStretch()
         close = QToolButton()
-        close.setIcon(ui_icon("close", "#aebbc1"))
+        self.set_themed_icon(close, "close", "close_icon")
         close.setIconSize(QSize(16, 16))
         close.setToolTip(f"{title} 패널 닫기")
         close.clicked.connect(dock.hide)
@@ -1227,6 +1318,8 @@ class Win(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.schedule_refit()
+        if self.scroll_page_indicator.isVisible():
+            self.position_scroll_page_indicator()
 
     def schedule_refit(self):
         if self.fit_mode and self.pages:
@@ -1359,6 +1452,7 @@ class Win(QMainWindow):
 
     def update_page_label(self):
         if not self.pages:
+            self.scroll_page_indicator.hide()
             return
         pno = self.current_page()
         for w in (self.page_spin, self.thumbs):
@@ -1369,6 +1463,36 @@ class Win(QMainWindow):
             w.blockSignals(False)
         if not self._restoring_page and pno != self._last_seen_page:
             self.store_page(pno)
+        self.show_scroll_page_indicator(pno)
+
+    def position_scroll_page_indicator(self):
+        bar = self.scroll.verticalScrollBar()
+        viewport = self.scroll.viewport()
+        option = QStyleOptionSlider()
+        bar.initStyleOption(option)
+        handle = bar.style().subControlRect(
+            QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarSlider, bar)
+        handle_top_left = bar.mapTo(viewport, handle.topLeft())
+        handle_center = bar.mapTo(viewport, handle.center())
+        label = self.scroll_page_indicator
+        label.adjustSize()
+        x = max(0, min(handle_top_left.x() - label.width() - 8,
+                       viewport.width() - label.width()))
+        y = max(0, min(handle_center.y() - label.height() // 2,
+                       viewport.height() - label.height()))
+        label.move(x, y)
+
+    def show_scroll_page_indicator(self, pno):
+        bar = self.scroll.verticalScrollBar()
+        if len(self.pages) <= 1 or not bar.isVisible() or bar.maximum() <= bar.minimum():
+            self.scroll_page_timer.stop()
+            self.scroll_page_indicator.hide()
+            return
+        self.scroll_page_indicator.setText(str(pno + 1))
+        self.position_scroll_page_indicator()
+        self.scroll_page_indicator.raise_()
+        self.scroll_page_indicator.show()
+        self.scroll_page_timer.start()
 
     def goto_page(self, pno):
         if 0 <= pno < len(self.pages):
@@ -1396,6 +1520,8 @@ class Win(QMainWindow):
             if self._restoring_page:
                 self._restoring_page = False
                 self.update_page_label()
+                self.scroll_page_timer.stop()
+                self.scroll_page_indicator.hide()
         # QScrollArea의 크기 조정과 페이지 레이아웃이 끝난 다음 위치를 복원한다.
         QTimer.singleShot(0, lambda: QTimer.singleShot(0, finish_zoom))
 
@@ -1464,6 +1590,36 @@ class Win(QMainWindow):
             pw.setCursor(pw.tool_cursor)
         self.update_properties()
 
+    # --- 테마 ---
+    def apply_theme(self, name):
+        name = name if name in THEMES else "다크"
+        self.theme_name = name
+        self.theme = THEMES[name]
+        self.apply_application_theme()
+        dpr = self.devicePixelRatioF()
+        colors = self.theme["colors"]
+        for target, icon, color_key in self.icon_targets:
+            target.setIcon(ui_icon(icon, colors[color_key], dpr))
+        for theme_name, action in self.theme_actions.items():
+            action.setChecked(theme_name == name)
+        next_name, next_icon = (("라이트", "sun") if name == "다크" else ("다크", "moon"))
+        self.theme_toggle_act.setText(f"{next_name} 테마로 전환")
+        self.theme_toggle_act.setToolTip(f"{next_name} 테마로 전환")
+        self.theme_toggle_act.setIcon(ui_icon(next_icon, colors["icon"], dpr))
+        self.update_swatch()
+        if self.scroll.widget():
+            self.paint_canvas(self.scroll.widget())
+        for pw in self.pages:
+            pw.invalidate(thumb=False)
+        settings = QSettings("pdf-editor", "PdfEditor")
+        settings.setValue("theme", name)
+        settings.sync()
+        if self.isVisible():
+            style_window_chrome(self)
+
+    def toggle_theme(self):
+        self.apply_theme("라이트" if self.theme_name == "다크" else "다크")
+
     def paint_canvas(self, box):
         pal = box.palette()
         pal.setColor(QPalette.Window, QColor(self.theme["canvas"]))
@@ -1494,10 +1650,11 @@ class Win(QMainWindow):
     def update_swatch(self):
         key = self.color_key
         current = self.colors[key].lower()
+        colors = self.theme["colors"]
         for button, color in zip(self.swatch_buttons, PRESETS[key]):
-            border = "#25a89a" if color.lower() == current else "#52636b"
+            border = colors["accent"] if color.lower() == current else colors["button_border"]
             button.setStyleSheet(f"QToolButton {{ background: {color}; border: 3px solid {border}; border-radius: 14px; }}"
-                                 f"QToolButton:hover {{ border-color: #75e1d5; }}")
+                                 f"QToolButton:hover {{ border-color: {colors['accent_text']}; }}")
             button.setToolTip(color)
         pm = QPixmap(18, 18)
         pm.fill(QColor(current))
@@ -1522,12 +1679,12 @@ def style_window_chrome(win):
     if sys.platform != "win32":
         return
     hwnd = int(win.winId())
-    dark = ctypes.c_int(1)
+    dark = ctypes.c_int(1 if win.theme["dark_title"] else 0)
     try:
         dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
         if dwm(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark)) != 0:
             dwm(hwnd, 19, ctypes.byref(dark), ctypes.sizeof(dark))
-        for attribute, hex_color in ((35, "#20272d"), (36, "#e8edef"), (34, "#364149")):
+        for attribute, hex_color in zip((35, 36, 34), win.theme["chrome"]):
             color = QColor(hex_color)
             value = ctypes.c_int(color.red() | color.green() << 8 | color.blue() << 16)
             dwm(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
