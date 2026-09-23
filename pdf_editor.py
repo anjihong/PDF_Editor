@@ -22,7 +22,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QF
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
                                QLineEdit, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QScrollArea, QSpinBox,
-                               QStyle, QStyleOptionSlider, QTextEdit, QToolBar, QToolButton, QToolTip,
+                               QStyle, QStyleOptionSlider, QTextEdit, QToolBar, QToolButton,
                                QVBoxLayout, QWidget)
 
 HIDDEN = pymupdf.PDF_ANNOT_IS_HIDDEN
@@ -233,13 +233,13 @@ THEMES = {
                chrome=("#20272d", "#e8edef", "#364149"),
                marker=("#f7dc87", "#b08338", "#70521e"),
                palette=("#20272d", "#e8edef", "#1e282e", "#273139", "#34434b", "#287f79", "#ffffff"),
-               note_style="QTextEdit{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+               note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
     "라이트": dict(qss=theme_qss(LIGHT_COLORS), colors=LIGHT_COLORS, canvas="#e7ebeb",
                 page_border="#bcc5c8", shadow=5, shadow_color="#c4ccce", dark_title=False,
                 chrome=("#f8faf9", "#243139", "#d5dddf"),
                 marker=("#f7dc87", "#b08338", "#70521e"),
                 palette=("#f8faf9", "#243139", "#ffffff", "#f1f4f3", "#f7f9f8", "#25a89a", "#ffffff"),
-                note_style="QTextEdit{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+                note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
 }
 
 # 화면 전체에 같은 굵기의 선형 아이콘을 사용한다. 파일 아이콘과 겹치지 않도록 UI 전용 경로로 둔다.
@@ -512,10 +512,13 @@ class InlineEditor(QTextEdit):
         if self.done:
             return
         self.done = True
+        page = self.parent()
         text = self.toPlainText().strip() if ok else None
         self.hide()
         self.deleteLater()
         self.on_done(text or None)
+        if ok and page.win.tool in ("text", "note"):
+            page.win.set_tool(None)
 
     def focusOutEvent(self, e):
         super().focusOutEvent(e)
@@ -666,6 +669,11 @@ class PageWidget(QWidget):
         self.search_hits = []
         self.tool_cursor = Qt.ArrowCursor
         self.tip_xref = None
+        self.hover_note = QLabel("", self, Qt.ToolTip)
+        self.hover_note.setTextFormat(Qt.PlainText)
+        self.hover_note.setWordWrap(True)
+        self.hover_note.setMaximumWidth(320)
+        self.hover_note.setStyleSheet(self.win.theme["note_style"])
         self.setMouseTracking(True)
         self.invalidate(thumb=False)
 
@@ -915,11 +923,18 @@ class PageWidget(QWidget):
         content = a.info["content"] if a and a.type[0] != pymupdf.PDF_ANNOT_FREE_TEXT else ""
         if content:
             if a.xref != self.tip_xref:
-                QToolTip.showText(global_pos.toPoint(), content, self)
+                self.hover_note.setText(content)
+                self.hover_note.adjustSize()
+                self.hover_note.move(round(global_pos.x()) + 12, round(global_pos.y()) + 18)
+                self.hover_note.show()
             self.tip_xref = a.xref
         else:
-            QToolTip.hideText()
+            self.hover_note.hide()
             self.tip_xref = None
+
+    def leaveEvent(self, event):
+        self.hover_note.hide()
+        super().leaveEvent(event)
 
     def start_highlight(self, pos):
         self.hl_points = [pos]
@@ -1061,7 +1076,7 @@ class PageWidget(QWidget):
 
     def start_note(self, pt, xref=None):
         win, pno = self.win, self.pno
-        QToolTip.hideText()
+        self.hover_note.hide()
         style = win.theme["note_style"]
         page = self.page
         if xref is not None:

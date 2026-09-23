@@ -6,11 +6,11 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPointF, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider
 
-from pdf_editor import PRESETS, THEMES, Win
+from pdf_editor import InlineEditor, PRESETS, THEMES, Win
 
 
 def settle(app):
@@ -150,6 +150,20 @@ def main():
         win.font_spin.setValue(26)
         assert win.font_size == 26
 
+        win.goto_page(0)
+        settle(app)
+        page = win.pages[0]
+        for tool, start in (("text", page.start_text), ("note", page.start_note)):
+            before = len(list(win.doc[0].annots()))
+            win.set_tool(tool)
+            start(pymupdf.Point(150, 150))
+            editor = page.findChild(InlineEditor)
+            QTest.keyClicks(editor, tool)
+            QTest.mouseClick(page, Qt.LeftButton, pos=QPointF(300 * page.zoom, 300 * page.zoom).toPoint())
+            settle(app)
+            assert win.tool is None and not page.findChildren(InlineEditor)
+            assert len(list(win.doc[0].annots())) == before + 1
+
         win.set_tool(None)
         assert not win.color_section.isVisible() and not win.width_section.isVisible()
 
@@ -168,6 +182,15 @@ def main():
         win.theme_toggle_act.trigger()
         settle(app)
         assert win.theme_name == "다크" and "라이트" in win.theme_toggle_act.text()
+
+        note = win.doc[0].add_text_annot((100, 100), "노란 메모")
+        page = win.pages[0]
+        page.hover_at(page.to_widget(note.rect).center(), QPointF(10, 10))
+        assert page.hover_note.isVisible() and "#fff8d7" in page.hover_note.styleSheet()
+        win.apply_theme("라이트")
+        assert page.hover_note.isVisible() and "#fff8d7" in page.hover_note.styleSheet()
+        page.hover_at(QPointF(0, 0), QPointF(0, 0))
+        assert not page.hover_note.isVisible()
 
         single = Path(directory) / "single.pdf"
         doc = pymupdf.open()
