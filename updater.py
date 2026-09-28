@@ -17,7 +17,7 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 REPOSITORY = "anjihong/PDF_Editor"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 LATEST_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"

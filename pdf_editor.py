@@ -11,6 +11,7 @@ import ctypes.wintypes
 import hashlib
 import math
 import os
+from collections import OrderedDict
 from functools import cache
 from pathlib import Path
 
@@ -141,6 +142,7 @@ def rgb(hex_color):
     return (c.redF(), c.greenF(), c.blueF())
 THUMB_ITEM_INSET = 12
 THUMB_REFIT_DELAY_MS = 100
+PAGE_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
 
 def theme_qss(c):
     return """
@@ -375,19 +377,9 @@ def purge_hidden(doc):
     return n
 
 
-def to_qimage(page, zoom):
-    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+def to_qimage(source, zoom):
+    pix = source.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
     return QImage(pix.samples_mv, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
-
-
-def thumbnail_icon(page, width, dpr=1.0):
-    render_width = max(1, round(width * dpr))
-    pixmap = QPixmap.fromImage(to_qimage(page, render_width / page.rect.width))
-    pixmap.setDevicePixelRatio(dpr)
-    icon = QIcon()
-    icon.addPixmap(pixmap, QIcon.Normal)
-    icon.addPixmap(pixmap, QIcon.Selected)
-    return icon
 
 
 # ---------- Undo 커맨드 ----------
@@ -657,6 +649,9 @@ class PageWidget(QWidget):
         super().__init__()
         self.win, self.pno = win, pno
         self.img = None
+        self.display_list = None
+        self.ink_overlay = None
+        self.note_markers = None
         self.words = None    # get_text("words") 캐시
         self.pts = []        # 펜 드래그 중 점(위젯 좌표)
         self.hl_points = []  # 형광펜 드래그 중 점(위젯 좌표)
@@ -686,18 +681,55 @@ class PageWidget(QWidget):
     def zoom(self):
         return self.win.zoom
 
-    def invalidate(self, thumb=True):
+    def invalidate(self, thumb=True, content=True):
+        self.win.drop_page_image(self.pno)
         self.img = None
+        if content:
+            self.display_list = None
+            self.note_markers = None
         r, s = self.page.rect, self.win.theme["shadow"]
         self.setFixedSize(int(r.width * self.zoom) + s, int(r.height * self.zoom) + s)
         self.update()
         if thumb:
-            self.win.update_thumb(self.pno)
+            self.win.schedule_thumbnail(self.pno)
 
     def get_words(self):
         if self.words is None:
             self.words = self.page.get_text("words")
         return self.words
+
+    def render(self, zoom):
+        if self.display_list is None:
+            self.display_list = self.page.get_displaylist()
+        return to_qimage(self.display_list, zoom)
+
+    def rebuild_ink_overlay(self):
+        self.ink_overlay = None
+        if len(self.pts) < 2:
+            return
+        dpr = self.devicePixelRatioF()
+        self.ink_overlay = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+        self.ink_overlay.setDevicePixelRatio(dpr)
+        self.ink_overlay.fill(Qt.transparent)
+        painter = QPainter(self.ink_overlay)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(self.win.colors["pen"]), self.win.width * self.zoom,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPolyline(self.pts)
+        painter.end()
+
+    def draw_ink_segment(self, start, end):
+        if self.ink_overlay is None:
+            self.rebuild_ink_overlay()
+        else:
+            painter = QPainter(self.ink_overlay)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor(self.win.colors["pen"]), self.win.width * self.zoom,
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(start, end)
+            painter.end()
+        pad = math.ceil(self.win.width * self.zoom / 2) + 2
+        self.update(QRectF(start, end).normalized().adjusted(-pad, -pad, pad, pad).toAlignedRect())
 
     def to_pdf(self, qp):
         return pymupdf.Point(qp.x() / self.zoom, qp.y() / self.zoom) * self.page.derotation_matrix
@@ -716,8 +748,9 @@ class PageWidget(QWidget):
     def paintEvent(self, _e):
         dpr = self.devicePixelRatioF()
         if self.img is None:
-            self.img = to_qimage(self.page, self.zoom * dpr)
+            self.img = self.render(self.zoom * dpr)
             self.img.setDevicePixelRatio(dpr)
+        self.win.cache_page_image(self.pno)
         theme, s = self.win.theme, self.win.theme["shadow"]
         paper = QRectF(0, 0, self.width() - s, self.height() - s)
         p = QPainter(self)
@@ -736,23 +769,25 @@ class PageWidget(QWidget):
             p.setBrush(fill)
             p.drawRect(self.to_widget(rect))
         # 메모 표식: 내용 있는 형광펜/펜 주석 우상단에 말풍선
-        page = self.page
-        for a in page.annots():
-            if a.info["content"] and a.type[0] not in (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT) \
-                    and not a.flags & HIDDEN:
-                r = self.to_widget(a.rect)
-                m = QRectF(r.right() - 7, r.top() - 9, 16, 14)
-                fill, edge, line = theme["marker"]
-                p.setPen(QPen(QColor(edge), 1))
-                p.setBrush(QColor(fill))
-                p.drawRoundedRect(m, 3, 3)
-                p.setPen(QPen(QColor(line), 1.5))
-                for i in range(3):
-                    p.drawLine(QPointF(m.left() + 4, m.top() + 4 + i * 3), QPointF(m.right() - 4, m.top() + 4 + i * 3))
+        if self.note_markers is None:
+            page = self.page
+            self.note_markers = [a.rect for a in page.annots()
+                                 if a.info["content"]
+                                 and a.type[0] not in (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT)
+                                 and not a.flags & HIDDEN]
+        for rect in self.note_markers:
+            r = self.to_widget(rect)
+            m = QRectF(r.right() - 7, r.top() - 9, 16, 14)
+            fill, edge, line = theme["marker"]
+            p.setPen(QPen(QColor(edge), 1))
+            p.setBrush(QColor(fill))
+            p.drawRoundedRect(m, 3, 3)
+            p.setPen(QPen(QColor(line), 1.5))
+            for i in range(3):
+                p.drawLine(QPointF(m.left() + 4, m.top() + 4 + i * 3), QPointF(m.right() - 4, m.top() + 4 + i * 3))
         color = QColor(self.win.colors.get(self.win.tool, "#000000"))
-        if len(self.pts) > 1:
-            p.setPen(QPen(color, self.win.width * self.zoom, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.drawPolyline(self.pts)
+        if self.ink_overlay is not None:
+            p.drawPixmap(0, 0, self.ink_overlay)
         if self.moving and (self.moving[3] - self.moving[1]).manhattanLength() > 4:
             p.setPen(QPen(QColor("#25a89a"), 1, Qt.DashLine))
             p.setBrush(QColor(37, 168, 154, 30))
@@ -780,6 +815,7 @@ class PageWidget(QWidget):
             self.pen_input = mode
             if mode == "pen":
                 self.pts = [pos]
+                self.ink_overlay = None
             elif mode == "erase":
                 self.erased = []
                 self.erase_previous = None
@@ -791,8 +827,9 @@ class PageWidget(QWidget):
 
     def move_pen_input(self, pos):
         if self.pen_input == "pen" and self.pts and pos != self.pts[-1]:
+            previous = self.pts[-1]
             self.pts.append(pos)
-            self.update()
+            self.draw_ink_segment(previous, pos)
         elif self.pen_input == "erase" and self.erased is not None:
             self.erase_at(self.to_pdf(pos))
 
@@ -988,6 +1025,7 @@ class PageWidget(QWidget):
     def finish_ink(self):
         pts = [self.to_pdf(p) for p in self.pts]
         self.pts = []
+        self.ink_overlay = None
         xref = None
         if len(pts) > 1:
             c, w = rgb(self.win.colors["pen"]), self.win.width
@@ -1109,6 +1147,8 @@ class Win(QMainWindow):
         self.qt_pen_eraser = False
         self._temporary_displayed = False
         self.doc, self.path, self.pages = None, None, []
+        self._page_image_cache = OrderedDict()
+        self._page_image_cache_bytes = 0
         self._document_generation = 0
         self._zoom_generation = 0
         self._pinch_start_zoom = None
@@ -1273,6 +1313,9 @@ class Win(QMainWindow):
         self._thumbnail_width = 0
         self._thumbnail_timer = QTimer(self, singleShot=True, interval=THUMB_REFIT_DELAY_MS)
         self._thumbnail_timer.timeout.connect(self.refit_thumbnails)
+        self._thumbnail_queue = []
+        self._thumbnail_render_timer = QTimer(self, singleShot=True)
+        self._thumbnail_render_timer.timeout.connect(self.render_next_thumbnail)
         self.thumbs.viewport().installEventFilter(self)
         self.pages_dock = self.make_dock("페이지", self.thumbs, Qt.LeftDockWidgetArea, 190)
         self.properties_dock = self.make_dock("속성", self.make_properties(), Qt.RightDockWidgetArea, 220)
@@ -1638,6 +1681,7 @@ class Win(QMainWindow):
                 set_hidden(pw.page, xref, False)
             pw.pen_input = None
             pw.pts = []
+            pw.ink_overlay = None
             pw.erased = None
             pw.erase_previous = None
             pw.erase_excluded = set()
@@ -1688,11 +1732,23 @@ class Win(QMainWindow):
             QTimer.singleShot(0, lambda: self.fit_width() if self.fit_mode else None)
 
     # --- 문서 ---
+    def drop_page_image(self, pno):
+        self._page_image_cache_bytes -= self._page_image_cache.pop(pno, 0)
+
+    def cache_page_image(self, pno):
+        self.drop_page_image(pno)
+        size = self.pages[pno].img.sizeInBytes()
+        self._page_image_cache[pno] = size
+        self._page_image_cache_bytes += size
+        while self._page_image_cache_bytes > PAGE_IMAGE_CACHE_BYTES and len(self._page_image_cache) > 1:
+            old_pno, old_size = self._page_image_cache.popitem(last=False)
+            self._page_image_cache_bytes -= old_size
+            self.pages[old_pno].img = None
+
     def store_page(self, pno):
         self._last_seen_page = pno
         settings = QSettings("pdf-editor", "PdfEditor")
         settings.setValue(page_settings_key(self.path), pno)
-        settings.sync()
 
     def remember_current_page(self):
         if not self.doc or not self.pages:
@@ -1707,6 +1763,8 @@ class Win(QMainWindow):
         self.remember_current_page()
         self.doc = new_doc
         self.path = path
+        self._page_image_cache.clear()
+        self._page_image_cache_bytes = 0
         self._document_generation += 1
         self._restoring_page = True
         try:
@@ -1732,6 +1790,8 @@ class Win(QMainWindow):
         for i in range(len(self.doc)):
             self.thumbs.addItem(QListWidgetItem(str(i + 1)))
         self._thumbnail_width = 0
+        self._thumbnail_queue = []
+        self._thumbnail_render_timer.stop()
         QTimer.singleShot(0, self.refit_thumbnails)
         self.page_spin.setMaximum(len(self.doc))
         self.page_label.setText(f"/ {len(self.doc)}")
@@ -1814,22 +1874,27 @@ class Win(QMainWindow):
     # --- 페이지 이동/목록 ---
     def current_page(self):
         y = self.scroll.verticalScrollBar().value() + self.scroll.viewport().height() / 2
-        for pw in self.pages:
-            if pw.y() + pw.height() >= y:
-                return pw.pno
-        return len(self.pages) - 1
+        low, high = 0, len(self.pages)
+        while low < high:
+            middle = (low + high) // 2
+            if self.pages[middle].y() + self.pages[middle].height() >= y:
+                high = middle
+            else:
+                low = middle + 1
+        return min(low, len(self.pages) - 1)
 
     def update_page_label(self):
         if not self.pages:
             self.scroll_page_indicator.hide()
             return
         pno = self.current_page()
-        for w in (self.page_spin, self.thumbs):
-            w.blockSignals(True)
-        self.page_spin.setValue(pno + 1)
-        self.thumbs.setCurrentRow(pno)
-        for w in (self.page_spin, self.thumbs):
-            w.blockSignals(False)
+        if self.page_spin.value() != pno + 1 or self.thumbs.currentRow() != pno:
+            for w in (self.page_spin, self.thumbs):
+                w.blockSignals(True)
+            self.page_spin.setValue(pno + 1)
+            self.thumbs.setCurrentRow(pno)
+            for w in (self.page_spin, self.thumbs):
+                w.blockSignals(False)
         if not self._restoring_page and pno != self._last_seen_page:
             self.store_page(pno)
         self.show_scroll_page_indicator(pno)
@@ -1870,9 +1935,30 @@ class Win(QMainWindow):
             page = self.doc[pno]
             height = math.ceil(width * page.rect.height / page.rect.width)
             item = self.thumbs.item(pno)
-            item.setIcon(thumbnail_icon(page, width, self.thumbs.devicePixelRatioF()))
+            dpr = self.thumbs.devicePixelRatioF()
+            image = self.pages[pno].render(width * dpr / page.rect.width)
+            image.setDevicePixelRatio(dpr)
+            pixmap = QPixmap.fromImage(image)
+            icon = QIcon()
+            icon.addPixmap(pixmap, QIcon.Normal)
+            icon.addPixmap(pixmap, QIcon.Selected)
+            item.setIcon(icon)
             item.setSizeHint(QSize(self.thumbs.viewport().width() - 2 * self.thumbs.spacing(),
                                    height + self.thumbs.fontMetrics().height() + 16))
+
+    def schedule_thumbnail(self, pno):
+        if pno not in self._thumbnail_queue:
+            self._thumbnail_queue.insert(0, pno)
+        self._thumbnail_render_timer.start()
+
+    def render_next_thumbnail(self):
+        if not self._thumbnail_queue:
+            return
+        pno = self._thumbnail_queue.pop(0)
+        if self.doc and pno < self.thumbs.count():
+            self.update_thumb(pno)
+        if self._thumbnail_queue:
+            self._thumbnail_render_timer.start()
 
     def thumbnail_width(self):
         return max(1, self.thumbs.viewport().width() - 2 * self.thumbs.spacing() - THUMB_ITEM_INSET)
@@ -1890,11 +1976,14 @@ class Win(QMainWindow):
         current = self.thumbs.currentItem()
         heights = [math.ceil(width * page.rect.height / page.rect.width) for page in self.doc]
         self._thumbnail_width = width
-        self.thumbs.setUpdatesEnabled(False)
         self.thumbs.setIconSize(QSize(width, max(heights)))
         for pno in range(self.thumbs.count()):
-            self.update_thumb(pno)
-        self.thumbs.setUpdatesEnabled(True)
+            self.thumbs.item(pno).setSizeHint(
+                QSize(self.thumbs.viewport().width() - 2 * self.thumbs.spacing(),
+                      heights[pno] + self.thumbs.fontMetrics().height() + 16))
+        center = max(0, self.current_page())
+        self._thumbnail_queue = sorted(range(self.thumbs.count()), key=lambda pno: abs(pno - center))
+        self._thumbnail_render_timer.start()
         self.thumbs.doItemsLayout()
         if current:
             self.thumbs.scrollToItem(current)
@@ -1914,7 +2003,7 @@ class Win(QMainWindow):
         self.fit_mode = fit
         self.zoom = max(0.3, min(5.0, z))
         for pw in self.pages:
-            pw.invalidate(thumb=False)
+            pw.invalidate(thumb=False, content=False)
         self.zoom_act.setText(f"{self.zoom * 100:.0f}%")
 
         def finish_zoom():
@@ -1960,6 +2049,8 @@ class Win(QMainWindow):
             self.width = width
         for pw in self.pages:
             if pw.hl_points or pw.pts:
+                if pw.pts:
+                    pw.rebuild_ink_overlay()
                 pw.update()
 
     @property
@@ -2016,7 +2107,7 @@ class Win(QMainWindow):
         if self.scroll.widget():
             self.paint_canvas(self.scroll.widget())
         for pw in self.pages:
-            pw.invalidate(thumb=False)
+            pw.update()
         settings = QSettings("pdf-editor", "PdfEditor")
         settings.setValue("theme", name)
         settings.sync()

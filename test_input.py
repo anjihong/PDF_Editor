@@ -163,6 +163,7 @@ def main():
         # A tablet side button splits a live pen stroke, erases, then resumes writing.
         tablet_event(page, device, QEvent.TabletPress, 100, 100, 1, Qt.LeftButton, Qt.LeftButton)
         tablet_event(page, device, QEvent.TabletMove, 120, 100, 1, Qt.NoButton, Qt.LeftButton)
+        assert page.ink_overlay is not None
         tablet_event(page, device, QEvent.TabletPress, 140, 100, 1, Qt.RightButton,
                      Qt.LeftButton | Qt.RightButton)
         assert page.pen_input == "erase" and win.undo.count() == 1
