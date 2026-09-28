@@ -78,7 +78,7 @@ def test_metadata(root):
     assert updater.version_tuple("v1.10.0") > updater.version_tuple("1.9.9")
     for value in (None, "v1.2", "1.2.3-beta", "1.2.3/other"):
         rejects(updater.version_tuple, value)
-    for tag in ("v1.1.0", "v1.2.0"):
+    for tag in ("v1.1.0", f"v{updater.APP_VERSION}"):
         assert updater.release_asset(release(tag=tag)) is None
     assert updater.release_asset(dict(release(), prerelease=True)) is None
     assert updater.release_asset(dict(release(), draft=True)) is None
