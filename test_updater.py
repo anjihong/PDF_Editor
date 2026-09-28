@@ -220,6 +220,9 @@ def test_windows_helper(app, root):
     compiler = Path(os.environ["SystemRoot"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
     source = root / "Stub.cs"
     source.write_text('using System; using System.IO; class Stub { static void Main(string[] args) { '
+                      'if (args.Length > 0 && args[0] == "--bootloader") { '
+                      'string stop = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "parent-exit"); '
+                      'while (!File.Exists(stop)) System.Threading.Thread.Sleep(10); return; } '
                       'File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launched.txt"), '
                       'String.Join("|", args) + "|" + Environment.GetEnvironmentVariable("PYINSTALLER_RESET_ENVIRONMENT")); } }')
     stub = root / "stub.exe"
@@ -234,11 +237,12 @@ def test_windows_helper(app, root):
     kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
     kernel.CreateFileW.restype = ctypes.c_void_p
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-    for mode in ("cancel", "unapproved_exit", "success", "locked", "rollback", "tampered", "read_only"):
+    for mode in ("cancel", "unapproved_exit", "success", "locked", "rollback", "tampered", "read_only",
+                 "bootloader", "cleanup_retry", "cleanup_failure"):
         folder = root / f"한글 공백 {mode}"
         folder.mkdir()
         target = folder / "PDF 편집기.exe"
-        target.write_bytes(b"previous executable")
+        target.write_bytes(stub.read_bytes() if mode == "bootloader" else b"previous executable")
         stage = Path(tempfile.mkdtemp(prefix=".pdfeditor-update-", dir=folder))
         payload = stub.read_bytes() if mode != "rollback" else b"invalid executable"
         (stage / "new.exe").write_bytes(payload)
@@ -247,6 +251,10 @@ def test_windows_helper(app, root):
         parent = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
         config = dict(target=str(target), pid=parent.pid, pdf=str(folder / "문서 & notes.pdf"),
                       sha256=hashlib.sha256(payload).hexdigest(), size=len(payload), log=str(folder / "update.log"))
+        bootloader = None
+        if mode == "bootloader":
+            bootloader = subprocess.Popen([str(target), "--bootloader"], creationflags=subprocess.CREATE_NO_WINDOW)
+            config["parent_pid"] = bootloader.pid
         (stage / "manifest.json").write_text(json.dumps(config), encoding="utf-8")
         if mode == "tampered":
             (stage / "new.exe").write_bytes(b"modified after download")
@@ -257,6 +265,11 @@ def test_windows_helper(app, root):
                                   creationflags=subprocess.CREATE_NO_WINDOW, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         lock = None
         try:
+            if mode in ("cleanup_retry", "cleanup_failure"):
+                obstacle = stage / "cleanup.lock"
+                obstacle.touch()
+                lock = kernel.CreateFileW(str(obstacle), 0x80000000, 0, None, 3, 0, None)
+                assert lock != ctypes.c_void_p(-1).value
             pump(app, lambda: (stage / "ready").exists() or helper.poll() is not None)
             assert helper.poll() is None, helper.communicate()
             if mode == "cancel":
@@ -268,16 +281,34 @@ def test_windows_helper(app, root):
                 (stage / "approved").touch()
             parent.stdin.close()
             parent.wait(timeout=10)
-            if lock:
+            if bootloader:
+                time.sleep(0.7)
+                assert helper.poll() is None and not (folder / "launched.txt").exists()
+                assert not (stage / "previous.exe").exists(), "Replaced EXE before bootloader exit"
+                (folder / "parent-exit").touch()
+                bootloader.wait(timeout=10)
+            if mode == "cleanup_retry":
+                pump(app, lambda: (folder / "update.log").exists())
+                assert "Cleanup retry:" in (folder / "update.log").read_text(encoding="utf-8")
+                assert helper.poll() is None
+                kernel.CloseHandle(lock)
+                lock = None
+            elif lock and mode != "cleanup_failure":
                 time.sleep(0.7)
                 assert helper.poll() is None and target.exists()
                 kernel.CloseHandle(lock)
                 lock = None
-            pump(app, lambda: helper.poll() is not None)
+            pump(app, lambda: helper.poll() is not None, seconds=20)
             stdout, stderr = helper.communicate()
             assert helper.returncode == (1 if mode in ("rollback", "tampered", "read_only") else 0), (mode, stdout, stderr, (folder / "update.log").read_text(encoding="utf-8") if (folder / "update.log").exists() else "no log")
-            assert not stage.exists(), (mode, (folder / "update.log").read_text(encoding="utf-8") if (folder / "update.log").exists() else "no log")
-            if mode in ("success", "locked"):
+            if mode == "cleanup_failure":
+                assert stage.exists()
+                assert "Cleanup failed after 10 seconds:" in (folder / "update.log").read_text(encoding="utf-8")
+            else:
+                assert not stage.exists(), (mode, (folder / "update.log").read_text(encoding="utf-8") if (folder / "update.log").exists() else "no log")
+            if mode == "cleanup_retry":
+                assert "Cleanup succeeded after retry:" in (folder / "update.log").read_text(encoding="utf-8")
+            if mode in ("success", "locked", "bootloader", "cleanup_retry", "cleanup_failure"):
                 pump(app, lambda: (folder / "launched.txt").exists())
                 assert target.read_bytes() == payload
                 assert (folder / "launched.txt").read_text(encoding="utf-8") == config["pdf"] + "|1"
@@ -287,6 +318,9 @@ def test_windows_helper(app, root):
             if mode == "rollback":
                 assert (folder / "update.log").exists()
         finally:
+            if bootloader and bootloader.poll() is None:
+                (folder / "parent-exit").touch()
+                bootloader.wait(timeout=10)
             target.chmod(stat.S_IWRITE)
             if lock:
                 kernel.CloseHandle(lock)

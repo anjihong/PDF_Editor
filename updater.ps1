@@ -7,6 +7,14 @@ $backup = Join-Path $stage 'previous.exe'
 $incoming = Join-Path $stage 'new.exe'
 $preserve = $false
 $config = $null
+function Write-UpdateLog([string]$message) {
+    if ($config.log) {
+        try {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($config.log)) | Out-Null
+            [IO.File]::AppendAllText($config.log, "$(Get-Date -Format s) $message`r`n")
+        } catch { }
+    }
+}
 try {
     $config = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
     $target = [IO.Path]::GetFullPath($config.target)
@@ -15,6 +23,17 @@ try {
         [IO.Path]::GetDirectoryName($stage) -ne [IO.Path]::GetDirectoryName($target) -or
         [IO.Path]::GetExtension($target) -ne '.exe') { throw 'Invalid update paths.' }
     $editor = [Diagnostics.Process]::GetProcessById([int]$config.pid)
+    $bootloader = $null
+    if ($config.parent_pid) {
+        try { $bootloader = [Diagnostics.Process]::GetProcessById([int]$config.parent_pid) }
+        catch [ArgumentException] { } # The parent may already have exited.
+        if ($bootloader) {
+            $null = $bootloader.Handle # Keep the original process handle, not just a reusable PID.
+            if ([IO.Path]::GetFullPath($bootloader.MainModule.FileName) -ne $target) {
+                throw 'The parent process is not the editor bootloader.'
+            }
+        }
+    }
     [IO.File]::WriteAllText((Join-Path $stage 'ready'), '')
     # No approval means no replacement, even when the editor crashes or is closed.
     while (-not [IO.File]::Exists($approved)) {
@@ -24,6 +43,11 @@ try {
     if ([IO.File]::Exists($cancelled)) { exit 0 }
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     if (-not $editor.WaitForExit(60000)) { throw 'The editor did not exit within 60 seconds.' }
+    # Onefile's parent still maps the old EXE while deleting its extracted files.
+    if ($bootloader) {
+        $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if (-not $bootloader.WaitForExit($remaining)) { throw 'The editor bootloader did not exit within 60 seconds.' }
+    }
     $stream = [IO.File]::OpenRead($incoming)
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
@@ -58,12 +82,7 @@ try {
         }
         catch { $preserve = $true; $message += "`nRestore failed. Backup: $backup`n$($_.Exception.Message)" }
     }
-    if ($config.log) {
-        try {
-            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($config.log)) | Out-Null
-            [IO.File]::AppendAllText($config.log, "$(Get-Date -Format s) $message`r`n")
-        } catch { }
-    }
+    Write-UpdateLog $message
     # Startup failures are reported by the still-running editor, not a second dialog.
     if ([IO.File]::Exists($approved)) {
         Add-Type -AssemblyName System.Windows.Forms
@@ -75,6 +94,25 @@ try {
 } finally {
     if (-not $preserve -and (Split-Path $stage -Leaf) -like '.pdfeditor-update-*' -and
         $config -and [IO.Path]::GetDirectoryName($stage) -eq [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($config.target))) {
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        $cleanupRetried = $false
+        while ([IO.Directory]::Exists($stage)) {
+            try {
+                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop
+                if ($cleanupRetried) { Write-UpdateLog "Cleanup succeeded after retry: $stage" }
+                break
+            } catch {
+                if (-not [IO.Directory]::Exists($stage)) { break }
+                if (-not $cleanupRetried) {
+                    Write-UpdateLog "Cleanup retry: $stage; $($_.Exception.GetType().FullName); $($_.Exception.Message)"
+                    $cleanupRetried = $true
+                }
+                if ([DateTime]::UtcNow -ge $cleanupDeadline) {
+                    Write-UpdateLog "Cleanup failed after 10 seconds: $stage; $($_.Exception.Message)"
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+        }
     }
 }

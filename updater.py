@@ -17,7 +17,7 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 REPOSITORY = "anjihong/PDF_Editor"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 LATEST_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
@@ -246,7 +246,7 @@ class Updater(QObject):
         source = Path(__file__).with_name("updater.ps1")
         # Windows PowerShell 5.1 requires a BOM for non-ASCII script text.
         (self.stage / "updater.ps1").write_text(source.read_text(encoding="utf-8"), encoding="utf-8-sig")
-        manifest = dict(target=str(Path(sys.executable).resolve()), pid=os.getpid(),
+        manifest = dict(target=str(Path(sys.executable).resolve()), pid=os.getpid(), parent_pid=os.getppid(),
                         pdf=str(Path(self.window.path).resolve()) if self.window.path else "",
                         sha256=self.asset["sha256"], size=self.asset["size"], log=str(LOG_PATH))
         (self.stage / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
