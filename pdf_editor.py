@@ -15,6 +15,7 @@ from functools import cache
 from pathlib import Path
 
 import pymupdf
+from updater import APP_VERSION, Updater
 from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRectF, QPointF, QSettings, QSize, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
                            QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QTextCursor,
@@ -1103,6 +1104,7 @@ TOOLS = [("펜", "pen", "pencil"), ("형광펜", "hl", "brush"), ("텍스트", "
 class Win(QMainWindow):
     def __init__(self, path=None):
         super().__init__()
+        self.updater = None
         self.pen_button = PenButtonState(self.on_native_pen_button_changed) if sys.platform == "win32" else None
         self.qt_pen_eraser = False
         self._temporary_displayed = False
@@ -1794,6 +1796,9 @@ class Win(QMainWindow):
                 e.ignore()
                 return
         self.remember_current_page()
+        if self.updater and not self.updater.before_close():
+            e.ignore()
+            return
         if self.pen_button:
             QApplication.instance().removeNativeEventFilter(self.pen_button)
         e.accept()
@@ -2097,6 +2102,7 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pdf-editor.PdfEditor")
     app = QApplication(sys.argv)
+    app.setApplicationVersion(APP_VERSION)
     app.setStyle("Fusion")
     app_icon = QIcon(str(ASSETS / "app.ico"))
     app.setWindowIcon(app_icon)
@@ -2104,4 +2110,5 @@ if __name__ == "__main__":
     win.setWindowIcon(app_icon)
     win.show()
     style_window_chrome(win)
+    win.updater = Updater(win)
     sys.exit(app.exec())

@@ -1,10 +1,14 @@
 @echo off
 cd /d %~dp0
 if not exist .venv python -m venv .venv
+if errorlevel 1 exit /b 1
 .venv\Scripts\python -m pip install -q -r requirements.txt
+if errorlevel 1 exit /b 1
 rem Keep third-party DLLs from the caller's PATH out of PyInstaller's dependency scan.
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem"
-.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name PdfEditor --icon assets\app.ico --add-data "assets;assets" pdf_editor.py
+.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name PdfEditor --icon assets\app.ico --add-data "assets;assets" --add-data "updater.ps1;." pdf_editor.py
+if errorlevel 1 exit /b 1
+if not exist dist\PdfEditor.exe exit /b 1
 echo.
 echo Done: dist\PdfEditor.exe
-pause
+if /i not "%~1"=="--no-pause" pause
