@@ -43,6 +43,8 @@
 | --- | --- |
 | `1` · `2` · `3` · `4` · `5` | 펜 · 형광펜 · 텍스트 · 메모 · 지우개. 같은 키를 다시 누르면 선택 모드 |
 | 우클릭 | 펜 모드에서는 누른 동안 지우개. 다른 도구에서는 도구 해제. 선택 모드에서는 편집 메뉴 |
+| 선택 모드에서 글자 드래그 후 우클릭 | 선택한 글자에 형광펜을 칠하거나 메모 추가. 메모는 형광펜 표시와 함께 저장 |
+| 형광펜 우클릭 · 메모 호버 | 형광펜에 메모 추가·수정 · 메모 내용 확인 |
 | S펜 버튼 | 누른 동안 임시 지우개, 놓으면 이전 도구로 복귀 |
 | `Ctrl+Enter` · `Esc` | 텍스트 입력 확정 · 취소 (`Enter`는 줄바꿈) |
 | `Ctrl+Z` · `Ctrl+Y` | 실행 취소 · 다시 실행 |
@@ -67,7 +69,7 @@ python pdf_editor.py [파일.pdf]
 
 Windows 실행 파일을 직접 빌드하려면 프로젝트 루트에서 `build.bat`을 실행하세요. 가상 환경 생성, 의존성 설치, PyInstaller 빌드 후 `dist\PdfEditor.exe`가 만들어집니다.
 
-테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`로 실행합니다.
+테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`, `python test_selection.py`로 실행합니다.
 
 업데이트 검증은 `python test_updater.py`로 실행합니다. 네트워크 오류·취소·저장 실패와 임시 폴더의 Windows EXE 교체·복구를 확인하며 실제 앱이나 릴리즈는 변경하지 않습니다.
 

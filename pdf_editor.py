@@ -19,7 +19,7 @@ import pymupdf
 from updater import APP_VERSION, Updater
 from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRectF, QPointF, QSettings, QSize, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
-                           QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QTextCursor,
+                           QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QPolygonF, QTextCursor,
                            QUndoCommand, QUndoStack)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QLabel, QListWidget,
@@ -325,9 +325,11 @@ def make_ink(page, pts, color, width):
     return a
 
 
-def make_highlight(page, quads, color):
+def make_highlight(page, quads, color, content=None):
     a = page.add_highlight_annot(quads)
     a.set_colors(stroke=color)
+    if content:
+        a.set_info(content=content)
     a.update()
     return a
 
@@ -653,6 +655,10 @@ class PageWidget(QWidget):
         self.ink_overlay = None
         self.note_markers = None
         self.words = None    # get_text("words") 캐시
+        self.text_chars = None  # 선택 모드용 글자 좌표 캐시
+        self.selection_anchor = None
+        self.selection_quads = []
+        self.selecting = False
         self.pts = []        # 펜 드래그 중 점(위젯 좌표)
         self.hl_points = []  # 형광펜 드래그 중 점(위젯 좌표)
         self.hl_lines = {}   # 닿은 단어를 (block, line)별로 합친 영역
@@ -684,6 +690,8 @@ class PageWidget(QWidget):
     def invalidate(self, thumb=True, content=True):
         self.win.drop_page_image(self.pno)
         self.img = None
+        self.hover_note.hide()
+        self.tip_xref = None
         if content:
             self.display_list = None
             self.note_markers = None
@@ -697,6 +705,52 @@ class PageWidget(QWidget):
         if self.words is None:
             self.words = self.page.get_text("words")
         return self.words
+
+    def get_text_chars(self):
+        if self.text_chars is None:
+            self.text_chars = []
+            for block in self.page.get_text("rawdict")["blocks"]:
+                if "lines" not in block:
+                    continue
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        self.text_chars.extend((pymupdf.Rect(char["bbox"]), line["dir"], span, char)
+                                               for char in span["chars"] if char["c"].strip())
+        return self.text_chars
+
+    def text_char_at(self, pt, inside=False):
+        chars = self.get_text_chars()
+        if inside:
+            chars = [(i, item) for i, item in enumerate(chars) if item[0].contains(pt)]
+            if not chars:
+                return None
+        else:
+            chars = enumerate(chars)
+        return min(chars, key=lambda entry: (max(entry[1][0].x0 - pt.x, 0, pt.x - entry[1][0].x1) ** 2
+                                              + max(entry[1][0].y0 - pt.y, 0, pt.y - entry[1][0].y1) ** 2),
+                   default=(None,))[0]
+
+    def select_to(self, pos):
+        end = self.text_char_at(self.to_pdf(pos))
+        if end is None or self.selection_anchor is None:
+            return
+        first, last = sorted((self.selection_anchor, end))
+        chars = self.get_text_chars()
+        quads = []
+        for _rect, direction, span, char in chars[first:last + 1]:
+            if quads and quads[-1][0] is span:
+                quads[-1][2].append(char)
+            else:
+                quads.append((span, direction, [char]))
+        self.selection_quads = [pymupdf.recover_span_quad(direction, span, selected)
+                                for span, direction, selected in quads]
+        self.update()
+
+    def clear_selection(self):
+        self.selection_anchor = None
+        self.selection_quads = []
+        self.selecting = False
+        self.update()
 
     def render(self, zoom):
         if self.display_list is None:
@@ -738,10 +792,20 @@ class PageWidget(QWidget):
         r, z = rect * self.page.rotation_matrix, self.zoom
         return QRectF(r.x0 * z, r.y0 * z, r.width * z, r.height * z)
 
-    def annot_at(self, pt):
+    def annot_at(self, pt, note_only=False, marker_pos=None):
         self._page = self.page   # Annot은 Page를 약참조하므로 반환 후에도 살려둠
-        for a in self._page.annots():
-            if not a.flags & HIDDEN and a.rect.contains(pt):
+        for a in reversed(list(self._page.annots())):
+            if a.flags & HIDDEN or note_only and not a.info["content"]:
+                continue
+            hit = a.rect.contains(pt)
+            if a.type[0] == pymupdf.PDF_ANNOT_HIGHLIGHT and a.vertices:
+                hit = any(pymupdf.Quad(*a.vertices[i:i + 4]).rect.contains(pt)
+                          for i in range(0, len(a.vertices), 4))
+            if not hit and marker_pos is not None and a.info["content"] and a.type[0] not in (
+                    pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT):
+                r = self.to_widget(a.rect)
+                hit = QRectF(r.right() - 7, r.top() - 9, 16, 14).contains(marker_pos)
+            if hit:
                 return a
         return None
 
@@ -785,6 +849,13 @@ class PageWidget(QWidget):
             p.setPen(QPen(QColor(line), 1.5))
             for i in range(3):
                 p.drawLine(QPointF(m.left() + 4, m.top() + 4 + i * 3), QPointF(m.right() - 4, m.top() + 4 + i * 3))
+        if self.selection_quads:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(37, 168, 154, 95))
+            for q in self.selection_quads:
+                points = [point * self.page.rotation_matrix * self.zoom
+                          for point in (q.ul, q.ur, q.lr, q.ll)]
+                p.drawPolygon(QPolygonF([QPointF(point.x, point.y) for point in points]))
         color = QColor(self.win.colors.get(self.win.tool, "#000000"))
         if self.ink_overlay is not None:
             p.drawPixmap(0, 0, self.ink_overlay)
@@ -901,8 +972,15 @@ class PageWidget(QWidget):
         t, pt = self.win.tool, self.to_pdf(e.position())
         a = self.annot_at(pt)
         if a and a.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and t in (None, "text"):
+            self.clear_selection()
             self.moving = [a.xref, e.position(), a.rect, e.position()]   # 릴리즈 때 클릭이면 편집, 드래그면 이동
             return
+        if t is None:
+            self.clear_selection()
+            self.selection_anchor = self.text_char_at(pt, inside=True)
+            self.selecting = self.selection_anchor is not None
+            if self.selecting:
+                return
         if a and t is None and a.info["content"]:
             return self.start_note(pt, a.xref)
         if t == "hl":
@@ -945,6 +1023,8 @@ class PageWidget(QWidget):
             return
         if self.erased is not None:
             self.erase_at(self.to_pdf(e.position()))
+        elif self.selecting:
+            self.select_to(e.position())
         elif self.hl_points:
             self.move_highlight(e.position())
         elif self.moving:
@@ -954,13 +1034,17 @@ class PageWidget(QWidget):
             self.hover_at(e.position(), e.globalPosition())
 
     def hover_at(self, pos, global_pos):
-        a = self.annot_at(self.to_pdf(pos))
-        is_text = (not self.win.temporary_eraser and a is not None
-                   and a.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and self.win.tool in (None, "text"))
-        self.setCursor(Qt.SizeAllCursor if is_text else self.tool_cursor)
+        pt = self.to_pdf(pos)
+        text_annot = self.annot_at(pt)
+        is_text = (not self.win.temporary_eraser and text_annot is not None
+                   and text_annot.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT
+                   and self.win.tool in (None, "text"))
+        selectable = self.win.tool is None and self.text_char_at(pt, inside=True) is not None
+        self.setCursor(Qt.SizeAllCursor if is_text else Qt.IBeamCursor if selectable else self.tool_cursor)
+        a = self.annot_at(pt, note_only=True, marker_pos=pos)
         content = a.info["content"] if a and a.type[0] != pymupdf.PDF_ANNOT_FREE_TEXT else ""
         if content:
-            if a.xref != self.tip_xref:
+            if a.xref != self.tip_xref or not self.hover_note.isVisible() or self.hover_note.text() != content:
                 self.hover_note.setText(content)
                 self.hover_note.adjustSize()
                 self.hover_note.move(round(global_pos.x()) + 12, round(global_pos.y()) + 18)
@@ -972,6 +1056,7 @@ class PageWidget(QWidget):
 
     def leaveEvent(self, event):
         self.hover_note.hide()
+        self.tip_xref = None
         super().leaveEvent(event)
 
     def start_highlight(self, pos):
@@ -1042,7 +1127,12 @@ class PageWidget(QWidget):
             e.accept()
             return
         win, pno = self.win, self.pno
-        if self.moving:
+        if self.selecting and e.button() == Qt.LeftButton:
+            self.select_to(e.position())
+            self.selecting = False
+            if self.selection_anchor == self.text_char_at(self.to_pdf(e.position())):
+                self.clear_selection()
+        elif self.moving:
             xref, start, rect, cur = self.moving
             self.moving = None
             if (cur - start).manhattanLength() > 4:
@@ -1066,7 +1156,15 @@ class PageWidget(QWidget):
         if win.tool:                 # 도구 켜진 상태에서 우클릭 = 도구 취소
             return win.set_tool(None)
         pt = self.to_pdf(QPointF(e.pos()))
-        a = self.annot_at(pt)
+        if self.selection_quads and any(q.rect.contains(pt) for q in self.selection_quads):
+            quads = list(self.selection_quads)
+            m = QMenu(self)
+            m.addAction("형광펜", lambda: self.highlight_selection(quads))
+            m.addAction("메모", lambda: self.start_note(pt, quads=quads))
+            m.exec(e.globalPos())
+            return
+        self.clear_selection()
+        a = self.annot_at(pt, marker_pos=QPointF(e.pos()))
         m = QMenu(self)
         if a is None:
             m.addAction("여기에 메모", lambda: self.start_note(pt))
@@ -1079,6 +1177,12 @@ class PageWidget(QWidget):
                 m.addAction("메모 수정" if a.info["content"] else "메모 추가", lambda: self.start_note(pt, xref))
             m.addAction("삭제", lambda: win.undo.push(SetHidden(win, pno, xref)))
         m.exec(e.globalPos())
+
+    def highlight_selection(self, quads):
+        self.clear_selection()
+        color = rgb(self.win.colors["hl"])
+        self.win.undo.push(AddAnnot(self.win, self.pno,
+                                    lambda page: make_highlight(page, quads, color), "형광펜"))
 
     # --- 인라인 편집 ---
     def start_text(self, pt, xref=None):
@@ -1113,21 +1217,29 @@ class PageWidget(QWidget):
         ed.set_font_px(round(win.font_size * z))
         win.font_spin.valueChanged.connect(lambda v: ed.set_font_px(round(v * z)))
 
-    def start_note(self, pt, xref=None):
+    def start_note(self, pt, xref=None, quads=None):
         win, pno = self.win, self.pno
         self.hover_note.hide()
+        self.tip_xref = None
+        if quads:
+            self.clear_selection()
         style = win.theme["note_style"]
         page = self.page
         if xref is not None:
             a = page.load_annot(xref)
             old, pos = a.info["content"], self.to_widget(a.rect).topRight().toPoint()
         else:
-            old, pos = "", self.to_widget(pymupdf.Rect(pt, pt)).topLeft().toPoint()
+            old, pos = "", (self.to_widget(quads[-1].rect).topRight().toPoint() if quads
+                            else self.to_widget(pymupdf.Rect(pt, pt)).topLeft().toPoint())
 
         def done(text):
             if xref is not None:
                 if text and text != old:
                     win.undo.push(SetContent(win, pno, xref, text))
+            elif text and quads:
+                color = rgb(win.colors["hl"])
+                win.undo.push(AddAnnot(win, pno,
+                                       lambda page: make_highlight(page, quads, color, text), "메모"))
             elif text:
                 win.undo.push(AddAnnot(win, pno, lambda page: make_note(page, pt, text), "메모"))
         InlineEditor(self, pos, old, 13, style, done, width=220)
@@ -1686,6 +1798,7 @@ class Win(QMainWindow):
             pw.erase_previous = None
             pw.erase_excluded = set()
             pw.moving = None
+            pw.clear_selection()
             if pw.hl_points or pw.preview:
                 pw.cancel_highlight()
             else:
@@ -2027,6 +2140,7 @@ class Win(QMainWindow):
     def set_tool(self, tool):
         if tool != self.tool:
             for pw in self.pages:
+                pw.clear_selection()
                 if pw.pen_input is not None:
                     pw.finish_pen_input()
                 if pw.hl_points:
@@ -2126,7 +2240,7 @@ class Win(QMainWindow):
     def update_properties(self):
         shown_tool = "erase" if self.temporary_eraser else self.tool
         details = {
-            None: ("선택", "문서의 주석을 클릭하거나 끌어 이동하세요. 위에서 편집 도구를 선택할 수 있습니다."),
+            None: ("선택", "글자를 드래그해 선택하고 우클릭으로 형광펜이나 메모를 추가하세요."),
             "pen": ("펜", "페이지 위에 자유롭게 그립니다."),
             "hl": ("형광펜", "글자 위에서는 텍스트 줄을 따라 표시합니다. 빈 공간에는 자유롭게 그릴 수 있습니다."),
             "text": ("텍스트", "페이지를 클릭해 글자를 입력하세요. Ctrl+Enter로 입력을 마칩니다."),
