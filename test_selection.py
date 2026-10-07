@@ -24,11 +24,21 @@ def center(rect):
     return pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
 
 
-def select(page, first, last):
+def select(page, first, last, choice=None):
     start, end = widget_point(page, first), widget_point(page, last)
-    QTest.mousePress(page, Qt.LeftButton, pos=start)
-    QTest.mouseMove(page, end)
-    QTest.mouseRelease(page, Qt.LeftButton, pos=end)
+    menus = []
+
+    class ChoiceMenu(QMenu):
+        def exec(self, global_pos):
+            menus.append(([action.text() for action in self.actions()], global_pos))
+            if choice:
+                next(action for action in self.actions() if action.text() == choice).trigger()
+
+    with patch.object(pdf_editor, "QMenu", ChoiceMenu):
+        QTest.mousePress(page, Qt.LeftButton, pos=start)
+        QTest.mouseMove(page, end)
+        QTest.mouseRelease(page, Qt.LeftButton, pos=end)
+    return menus
 
 
 def menu_action(page, point, label):
@@ -65,7 +75,8 @@ def main():
 
         # A partial word remains a partial word on a rotated page.
         first, last = center(chars[1][0]), center(chars[3][0])
-        select(page, first, last)
+        menus = select(page, first, last)
+        assert menus == [(["형광펜", "메모"], page.mapToGlobal(widget_point(page, last)))]
         assert len(page.selection_quads) == 1
         assert page.selection_quads[0].rect.width < pymupdf.Rect(page.get_words()[0][:4]).width
         page.repaint()
@@ -83,9 +94,8 @@ def main():
         assert win.doc[0].load_annot(annots[0].xref).info["content"] == "기존 형광펜 메모"
 
         # Selected text spanning two rows gets one annotation with two quads.
-        select(page, center(chars[6][0]), center(chars[-2][0]))
-        assert len(page.selection_quads) == 2
-        menu_action(page, center(chars[7][0]), "메모")
+        menus = select(page, center(chars[6][0]), center(chars[-2][0]), "메모")
+        assert len(menus) == 1
         editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
         editor.setPlainText("선택한 글자 메모")
         editor.finish(True)
@@ -121,6 +131,14 @@ def main():
         editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
         editor.finish(False)
         assert win.undo.count() == before
+
+        # A single click opens no menu; direct highlight still works after a drag.
+        assert not select(page, center(chars[0][0]), center(chars[0][0]))
+        assert not page.selection_quads
+        before = len(list(win.doc[0].annots()))
+        assert len(select(page, center(chars[0][0]), center(chars[1][0]), "형광펜")) == 1
+        assert len(list(win.doc[0].annots())) == before + 1
+        assert not page.selection_quads
 
         assert win.save()
         assert win.close()

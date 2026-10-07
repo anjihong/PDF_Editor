@@ -1132,6 +1132,8 @@ class PageWidget(QWidget):
             self.selecting = False
             if self.selection_anchor == self.text_char_at(self.to_pdf(e.position())):
                 self.clear_selection()
+            elif self.selection_quads:
+                self.show_selection_menu(self.to_pdf(e.position()), e.globalPosition().toPoint())
         elif self.moving:
             xref, start, rect, cur = self.moving
             self.moving = None
@@ -1157,11 +1159,7 @@ class PageWidget(QWidget):
             return win.set_tool(None)
         pt = self.to_pdf(QPointF(e.pos()))
         if self.selection_quads and any(q.rect.contains(pt) for q in self.selection_quads):
-            quads = list(self.selection_quads)
-            m = QMenu(self)
-            m.addAction("형광펜", lambda: self.highlight_selection(quads))
-            m.addAction("메모", lambda: self.start_note(pt, quads=quads))
-            m.exec(e.globalPos())
+            self.show_selection_menu(pt, e.globalPos())
             return
         self.clear_selection()
         a = self.annot_at(pt, marker_pos=QPointF(e.pos()))
@@ -1177,6 +1175,13 @@ class PageWidget(QWidget):
                 m.addAction("메모 수정" if a.info["content"] else "메모 추가", lambda: self.start_note(pt, xref))
             m.addAction("삭제", lambda: win.undo.push(SetHidden(win, pno, xref)))
         m.exec(e.globalPos())
+
+    def show_selection_menu(self, pt, global_pos):
+        quads = list(self.selection_quads)
+        m = QMenu(self)
+        m.addAction("형광펜", lambda: self.highlight_selection(quads))
+        m.addAction("메모", lambda: self.start_note(pt, quads=quads))
+        m.exec(global_pos)
 
     def highlight_selection(self, quads):
         self.clear_selection()
@@ -2240,7 +2245,7 @@ class Win(QMainWindow):
     def update_properties(self):
         shown_tool = "erase" if self.temporary_eraser else self.tool
         details = {
-            None: ("선택", "글자를 드래그해 선택하고 우클릭으로 형광펜이나 메모를 추가하세요."),
+            None: ("선택", "글자를 드래그해 놓으면 형광펜이나 메모 메뉴가 열립니다."),
             "pen": ("펜", "페이지 위에 자유롭게 그립니다."),
             "hl": ("형광펜", "글자 위에서는 텍스트 줄을 따라 표시합니다. 빈 공간에는 자유롭게 그릴 수 있습니다."),
             "text": ("텍스트", "페이지를 클릭해 글자를 입력하세요. Ctrl+Enter로 입력을 마칩니다."),
