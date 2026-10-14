@@ -16,7 +16,13 @@ from collections import OrderedDict
 from functools import cache
 from pathlib import Path
 
+from crash_log import install_crash_logging, log, log_exceptions
+
+if __name__ == "__main__":
+    install_crash_logging()
+
 import pymupdf
+from PySide6 import __version__ as pyside_version
 from updater import APP_VERSION, Updater
 from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRect, QRectF, QPoint, QPointF, QSettings, QSize, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
@@ -511,6 +517,7 @@ class AddAnnot(Cmd):
         super().__init__(win, pno, text)
         self.make, self.xref = make, None
 
+    @log_exceptions
     def redo(self):
         if self.xref is None:
             self.xref = self.make(self.page).xref
@@ -518,6 +525,7 @@ class AddAnnot(Cmd):
             set_hidden(self.page, self.xref, False)
         self.refresh()
 
+    @log_exceptions
     def undo(self):
         set_hidden(self.page, self.xref, True)
         self.refresh()
@@ -528,10 +536,12 @@ class SetHidden(Cmd):
         super().__init__(win, pno, text)
         self.xref = xref
 
+    @log_exceptions
     def redo(self):
         set_hidden(self.page, self.xref, True)
         self.refresh()
 
+    @log_exceptions
     def undo(self):
         set_hidden(self.page, self.xref, False)
         self.refresh()
@@ -546,10 +556,12 @@ class SetContent(Cmd):
         self.old_rect, self.new_rect = (a.rect, new_rect) if new_rect is not None else (None, None)
         self.old_fs, self.new_fs = (annot_fontsize(win.doc, xref), fontsize) if fontsize else (None, None)
 
+    @log_exceptions
     def redo(self):
         set_content(self.page, self.xref, self.new, self.new_rect, self.new_fs)
         self.refresh()
 
+    @log_exceptions
     def undo(self):
         set_content(self.page, self.xref, self.old, self.old_rect, self.old_fs)
         self.refresh()
@@ -570,9 +582,11 @@ class MoveAnnot(Cmd):
                               annot_text_color(self.win.doc, self.xref))
         self.refresh()
 
+    @log_exceptions
     def redo(self):
         self.apply(self.new_rect)
 
+    @log_exceptions
     def undo(self):
         self.apply(self.old_rect)
 
@@ -618,6 +632,7 @@ class InlineEditor(QTextEdit):
         self.resize(w, self.height())
         self.resize(w, max(24, int(doc.size().height()) + 12))
 
+    @log_exceptions
     def finish(self, ok):
         if self.done:
             return
@@ -1406,6 +1421,8 @@ class PageWidget(QWidget):
 
         def done(text):
             fs = win.font_size
+            log.info("TEXT_COMMIT page=%s xref=%s chars=%s font_size=%s custom=%s",
+                     pno + 1, xref, len(text or ""), fs, custom)
             if xref is not None:
                 set_hidden(self.page, xref, False)
                 if text and (text != old or fs != fs0):
@@ -2536,6 +2553,7 @@ def style_window_chrome(win):
 
 
 if __name__ == "__main__":
+    log.info("Versions app=%s PySide6=%s PyMuPDF=%s", APP_VERSION, pyside_version, pymupdf.__version__)
     if sys.platform == "win32":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pdf-editor.PdfEditor")
     app = QApplication(sys.argv)

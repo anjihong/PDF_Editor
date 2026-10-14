@@ -74,6 +74,8 @@ Windows 실행 파일을 직접 빌드하려면 [메모먼트 꾸꾸꾸 글꼴](
 
 테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`, `python test_selection.py`, `python test_text_font.py`로 실행합니다.
 
+일반 실행에서도 오류와 강제 종료 추적을 `%LOCALAPPDATA%\PdfEditor\crash.log`에 누적 기록합니다. 텍스트 확정 시 페이지·주석 ID·글자 수·글자 크기를 기록하며 입력 본문은 기록하지 않습니다. 오류 로깅 검증은 `python test_crash_log.py`로 실행합니다.
+
 업데이트 검증은 `python test_updater.py`로 실행합니다. 네트워크 오류·취소·저장 실패와 임시 폴더의 Windows EXE 교체·복구를 확인하며 실제 앱이나 릴리즈는 변경하지 않습니다.
 
 ### 릴리즈 절차
