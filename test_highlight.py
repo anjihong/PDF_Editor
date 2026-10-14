@@ -2,11 +2,13 @@
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+import pdf_editor
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt
 from PySide6.QtGui import QInputDevice, QPointingDevice, QTabletEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -48,8 +50,12 @@ def annots(widget):
 
 
 def main():
-    app = QApplication([])
     with tempfile.TemporaryDirectory() as directory:
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
+        settings_patch = patch.object(pdf_editor, "QSettings", new=lambda org, app:
+                                      QSettings(QSettings.IniFormat, QSettings.UserScope, org, app))
+        settings_patch.start()
+        app = QApplication([])
         path = Path(directory) / "highlight.pdf"
         doc = pymupdf.open()
         text = doc.new_page(width=400, height=300)
@@ -121,6 +127,40 @@ def main():
         tablet_stroke(page, device, [pymupdf.Point(25, 210), first, pymupdf.Point(250, 210)])
         assert annots(page)[-1].type[0] == pymupdf.PDF_ANNOT_HIGHLIGHT
 
+        # A single glyph stays narrower than its word on a rotated page.
+        chars = page.get_text_chars()
+        first_char = chars[0][0]
+        first_center = pymupdf.Point((first_char.x0 + first_char.x1) / 2,
+                                     (first_char.y0 + first_char.y1) / 2)
+        mouse_stroke(page, [first_center, first_center])
+        glyph = annots(page)[-1]
+        assert glyph.type[0] == pymupdf.PDF_ANNOT_HIGHLIGHT
+        assert (max(point[0] for point in glyph.vertices) - min(point[0] for point in glyph.vertices)
+                < pymupdf.Rect(words[0][:4]).width / 2 + 1)
+
+        # A path through blank space keeps two touched letters separate.
+        last_char = chars[4][0]
+        last_center = pymupdf.Point((last_char.x0 + last_char.x1) / 2,
+                                    (last_char.y0 + last_char.y1) / 2)
+        above = first_char.y0 - 25
+        for index, point in enumerate((first_center, pymupdf.Point(first_center.x, above),
+                                       pymupdf.Point(last_center.x, above), last_center)):
+            pos = QPointF(widget_point(page, point))
+            if index == 0:
+                page.start_highlight(pos)
+            else:
+                page.move_highlight(pos)
+        assert len(page.preview) == 2
+        page.cancel_highlight()
+
+        second_char = next(item[0] for item in chars if item[0].y0 > first_char.y1 + 10)
+        second_center = pymupdf.Point((second_char.x0 + second_char.x1) / 2,
+                                      (second_char.y0 + second_char.y1) / 2)
+        page.start_highlight(QPointF(widget_point(page, first_center)))
+        page.move_highlight(QPointF(widget_point(page, second_center)))
+        assert len(page.preview) == 2
+        page.cancel_highlight()
+
         scanned = win.pages[1]
         assert not scanned.get_words()
         tablet_stroke(scanned, device, [pymupdf.Point(55, 85), pymupdf.Point(160, 85)])
@@ -133,10 +173,11 @@ def main():
         assert [a.type[0] for a in reopened_text.annots()] == [
             pymupdf.PDF_ANNOT_HIGHLIGHT, pymupdf.PDF_ANNOT_HIGHLIGHT,
             pymupdf.PDF_ANNOT_INK, pymupdf.PDF_ANNOT_INK,
-            pymupdf.PDF_ANNOT_HIGHLIGHT]
+            pymupdf.PDF_ANNOT_HIGHLIGHT, pymupdf.PDF_ANNOT_HIGHLIGHT]
         assert [a.type[0] for a in reopened_scan.annots()] == [pymupdf.PDF_ANNOT_INK]
         assert abs(next(a for a in reopened_text.annots() if a.type[0] == pymupdf.PDF_ANNOT_INK).opacity - 0.35) < 0.01
         reopened.close()
+        settings_patch.stop()
     print("ok")
 
 

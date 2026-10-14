@@ -299,17 +299,30 @@ def line_quads(page, rect, words=None):
 
 def segment_word_hits(start, end, words, tolerance=0):
     """Return words touched by a stroke segment in unrotated PDF coordinates."""
+    words = list(words)
+    for index in segment_rect_hits(start, end, (pymupdf.Rect(word[:4]) for word in words), tolerance):
+        word = words[index]
+        yield (word[5], word[6]), pymupdf.Rect(word[:4])
+
+
+def segment_rect_hits(start, end, rects, tolerance=0):
+    """Return indices of rectangles touched by a stroke segment."""
     a, b = (start.x, start.y), (end.x, end.y)
-    for x0, y0, x1, y1, _word, block, line, _number in words:
-        rect = pymupdf.Rect(x0 - tolerance, y0 - tolerance, x1 + tolerance, y1 + tolerance)
+    left, right = sorted((start.x, end.x))
+    top, bottom = sorted((start.y, end.y))
+    for index, bounds in enumerate(rects):
+        rect = pymupdf.Rect(bounds.x0 - tolerance, bounds.y0 - tolerance,
+                            bounds.x1 + tolerance, bounds.y1 + tolerance)
+        if rect.x1 < left or rect.x0 > right or rect.y1 < top or rect.y0 > bottom:
+            continue
         if rect.contains(start) or rect.contains(end):
-            yield (block, line), pymupdf.Rect(x0, y0, x1, y1)
+            yield index
             continue
         corners = [(rect.x0, rect.y0), (rect.x1, rect.y0),
                    (rect.x1, rect.y1), (rect.x0, rect.y1)]
         if any(segments_distance_sq(a, b, corners[i], corners[(i + 1) % 4]) == 0
                for i in range(4)):
-            yield (block, line), pymupdf.Rect(x0, y0, x1, y1)
+            yield index
 
 
 def text_rect(pt, text, fs=FONT_SIZE):
@@ -737,7 +750,7 @@ class PageWidget(QWidget):
         self.selecting = False
         self.pts = []        # 펜 드래그 중 점(위젯 좌표)
         self.hl_points = []  # 형광펜 드래그 중 점(위젯 좌표)
-        self.hl_lines = {}   # 닿은 단어를 (block, line)별로 합친 영역
+        self.hl_chars = set()  # 형광펜 선이 닿은 글자 인덱스
         self.preview = []    # 형광펜 미리보기 quads
         self.moving = None   # 텍스트 드래그 이동 [xref, 시작, 원래 rect, 현재]
         self.erased = None   # 지우개 드래그 중 숨긴 xref 목록
@@ -982,7 +995,9 @@ class PageWidget(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(color)
             for q in self.preview:
-                p.drawRect(self.to_widget(q.rect))
+                points = [point * self.page.rotation_matrix * self.zoom
+                          for point in (q.ul, q.ur, q.lr, q.ll)]
+                p.drawPolygon(QPolygonF([QPointF(point.x, point.y) for point in points]))
         elif len(self.hl_points) > 1:
             color.setAlpha(round(255 * HIGHLIGHT_INK_OPACITY))
             p.setPen(QPen(color, self.win.hl_width * self.zoom, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -1177,15 +1192,27 @@ class PageWidget(QWidget):
 
     def start_highlight(self, pos):
         self.hl_points = [pos]
-        self.hl_lines = {}
+        self.hl_chars = set()
         self._match_highlight_segment(pos, pos)
         self.update()
 
     def _match_highlight_segment(self, start, end):
         tolerance = 1 / self.zoom
-        for key, rect in segment_word_hits(self.to_pdf(start), self.to_pdf(end), self.get_words(), tolerance):
-            self.hl_lines[key] = self.hl_lines[key] | rect if key in self.hl_lines else rect
-        self.preview = [rect.quad for rect in self.hl_lines.values()]
+        chars = self.get_text_chars()
+        self.hl_chars.update(segment_rect_hits(self.to_pdf(start), self.to_pdf(end),
+                                               (item[0] for item in chars), tolerance))
+        groups = []
+        previous_end = None
+        for index in sorted(self.hl_chars):
+            _rect, direction, span, char = chars[index]
+            offset = self.text_char_offsets[index]
+            if groups and groups[-1][0] is span and offset == previous_end:
+                groups[-1][2].append(char)
+            else:
+                groups.append((span, direction, [char]))
+            previous_end = offset + len(char["c"])
+        self.preview = [pymupdf.recover_span_quad(direction, span, selected)
+                        for span, direction, selected in groups]
 
     def move_highlight(self, pos):
         if pos != self.hl_points[-1]:
@@ -1195,7 +1222,7 @@ class PageWidget(QWidget):
 
     def cancel_highlight(self):
         self.hl_points = []
-        self.hl_lines = {}
+        self.hl_chars = set()
         self.preview = []
         self.update()
 
@@ -2373,7 +2400,7 @@ class Win(QMainWindow):
         details = {
             None: ("선택", "글자를 드래그해 놓으면 형광펜이나 메모 메뉴가 열립니다. Ctrl+C로 복사합니다."),
             "pen": ("펜", "페이지 위에 자유롭게 그립니다."),
-            "hl": ("형광펜", "글자 위에서는 텍스트 줄을 따라 표시합니다. 빈 공간에는 자유롭게 그릴 수 있습니다."),
+            "hl": ("형광펜", "선이 닿은 글자만 표시합니다. 빈 공간에는 자유롭게 그릴 수 있습니다."),
             "text": ("텍스트", "페이지를 클릭해 글자를 입력하세요. Ctrl+Enter로 입력을 마칩니다."),
             "note": ("메모", "페이지를 클릭해 메모를 추가하세요."),
             "erase": ("지우개", "주석 위를 드래그해서 삭제합니다."),
