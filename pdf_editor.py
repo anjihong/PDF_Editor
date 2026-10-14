@@ -655,8 +655,12 @@ class PageWidget(QWidget):
         self.ink_overlay = None
         self.note_markers = None
         self.words = None    # get_text("words") 캐시
-        self.text_chars = None  # 선택 모드용 글자 좌표 캐시
+        self.text_chars = None  # 선택과 형광펜용 글자 좌표 캐시
+        self.text_content = ""
+        self.text_char_offsets = []
         self.selection_anchor = None
+        self.selection_press = None
+        self.selection_range = None
         self.selection_quads = []
         self.selecting = False
         self.pts = []        # 펜 드래그 중 점(위젯 좌표)
@@ -671,12 +675,14 @@ class PageWidget(QWidget):
         self.search_hits = []
         self.tool_cursor = Qt.ArrowCursor
         self.tip_xref = None
+        self.selection_menu = None
         self.hover_note = QLabel("", self, Qt.ToolTip)
         self.hover_note.setTextFormat(Qt.PlainText)
         self.hover_note.setWordWrap(True)
         self.hover_note.setMaximumWidth(320)
         self.hover_note.setStyleSheet(self.win.theme["note_style"])
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.invalidate(thumb=False)
 
     @property
@@ -709,13 +715,24 @@ class PageWidget(QWidget):
     def get_text_chars(self):
         if self.text_chars is None:
             self.text_chars = []
+            content = []
+            offset = 0
+            self.text_char_offsets = []
             for block in self.page.get_text("rawdict")["blocks"]:
                 if "lines" not in block:
                     continue
                 for line in block["lines"]:
+                    if content:
+                        content.append("\n")
+                        offset += 1
                     for span in line["spans"]:
-                        self.text_chars.extend((pymupdf.Rect(char["bbox"]), line["dir"], span, char)
-                                               for char in span["chars"] if char["c"].strip())
+                        for char in span["chars"]:
+                            if char["c"].strip():
+                                self.text_chars.append((pymupdf.Rect(char["bbox"]), line["dir"], span, char))
+                                self.text_char_offsets.append(offset)
+                            content.append(char["c"])
+                            offset += len(char["c"])
+            self.text_content = "".join(content)
         return self.text_chars
 
     def text_char_at(self, pt, inside=False):
@@ -735,6 +752,7 @@ class PageWidget(QWidget):
         if end is None or self.selection_anchor is None:
             return
         first, last = sorted((self.selection_anchor, end))
+        self.selection_range = first, last
         chars = self.get_text_chars()
         quads = []
         for _rect, direction, span, char in chars[first:last + 1]:
@@ -748,9 +766,33 @@ class PageWidget(QWidget):
 
     def clear_selection(self):
         self.selection_anchor = None
+        self.selection_press = None
+        self.selection_range = None
         self.selection_quads = []
         self.selecting = False
         self.update()
+
+    def copy_selection(self):
+        if self.selection_range is None:
+            return False
+        first, last = self.selection_range
+        offsets = self.text_char_offsets
+        last_char = self.text_chars[last][3]["c"]
+        QApplication.clipboard().setText(self.text_content[offsets[first]:offsets[last] + len(last_char)])
+        return True
+
+    def keyPressEvent(self, e):
+        if self.win.tool is None and e.matches(QKeySequence.Copy) and self.copy_selection():
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self.selection_menu and e.type() == QEvent.KeyPress and e.matches(QKeySequence.Copy):
+            if self.copy_selection():
+                obj.close()
+                return True
+        return super().eventFilter(obj, e)
 
     def render(self, zoom):
         if self.display_list is None:
@@ -980,6 +1022,8 @@ class PageWidget(QWidget):
             self.selection_anchor = self.text_char_at(pt, inside=True)
             self.selecting = self.selection_anchor is not None
             if self.selecting:
+                self.selection_press = e.position()
+                self.setFocus()
                 return
         if a and t is None and a.info["content"]:
             return self.start_note(pt, a.xref)
@@ -1130,7 +1174,8 @@ class PageWidget(QWidget):
         if self.selecting and e.button() == Qt.LeftButton:
             self.select_to(e.position())
             self.selecting = False
-            if self.selection_anchor == self.text_char_at(self.to_pdf(e.position())):
+            if (self.selection_anchor == self.text_char_at(self.to_pdf(e.position()))
+                    and (e.position() - self.selection_press).manhattanLength() <= 4):
                 self.clear_selection()
             elif self.selection_quads:
                 self.show_selection_menu(self.to_pdf(e.position()), e.globalPosition().toPoint())
@@ -1181,7 +1226,12 @@ class PageWidget(QWidget):
         m = QMenu(self)
         m.addAction("형광펜", lambda: self.highlight_selection(quads))
         m.addAction("메모", lambda: self.start_note(pt, quads=quads))
+        self.selection_menu = m
+        m.installEventFilter(self)
         m.exec(global_pos)
+        self.selection_menu = None
+        if self.selection_range is not None:
+            QTimer.singleShot(0, self.setFocus)
 
     def highlight_selection(self, quads):
         self.clear_selection()
@@ -2245,7 +2295,7 @@ class Win(QMainWindow):
     def update_properties(self):
         shown_tool = "erase" if self.temporary_eraser else self.tool
         details = {
-            None: ("선택", "글자를 드래그해 놓으면 형광펜이나 메모 메뉴가 열립니다."),
+            None: ("선택", "글자를 드래그해 놓으면 형광펜이나 메모 메뉴가 열립니다. Ctrl+C로 복사합니다."),
             "pen": ("펜", "페이지 위에 자유롭게 그립니다."),
             "hl": ("형광펜", "글자 위에서는 텍스트 줄을 따라 표시합니다. 빈 공간에는 자유롭게 그릴 수 있습니다."),
             "text": ("텍스트", "페이지를 클릭해 글자를 입력하세요. Ctrl+Enter로 입력을 마칩니다."),
