@@ -598,6 +598,7 @@ class InlineEditor(QTextEdit):
         self.move(pos)
         self.fit()
         self.show()
+        self.fit()
         self.setFocus()
 
     def set_font_px(self, px):
@@ -1192,7 +1193,7 @@ class PageWidget(QWidget):
         else:
             self.hover_at(e.position(), e.globalPosition())
 
-    def hover_at(self, pos, global_pos):
+    def hover_at(self, pos, _global_pos):
         pt = self.to_pdf(pos)
         text_annot = self.annot_at(pt)
         is_text = (not self.win.temporary_eraser and text_annot is not None
@@ -1205,9 +1206,11 @@ class PageWidget(QWidget):
         if content:
             if self.hover_note.text() != content:
                 self.hover_note.setText(content)
-            anchor = global_pos.toPoint()
-            screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
             viewport = self.win.scroll.viewport()
+            anchor = self.mapToGlobal(self.to_widget(a.rect).topRight().toPoint())
+            screen = (QApplication.screenAt(anchor)
+                      or QApplication.screenAt(viewport.mapToGlobal(viewport.rect().center()))
+                      or QApplication.primaryScreen())
             bounds = screen.availableGeometry().intersected(
                 QRect(viewport.mapToGlobal(QPoint(0, 0)), viewport.size()))
             if bounds.isEmpty():

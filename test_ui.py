@@ -188,6 +188,9 @@ def main():
         page = win.pages[0]
         page.hover_at(page.to_widget(note.rect).center(), QPointF(10, 10))
         assert page.hover_note.isVisible() and "#fff8d7" in page.hover_note.styleSheet()
+        hover_pos = page.hover_note.pos()
+        page.hover_at(page.to_widget(note.rect).topLeft() + QPointF(1, 1), QPointF(500, 500))
+        assert page.hover_note.pos() == hover_pos
         win.apply_theme("라이트")
         assert page.hover_note.isVisible() and "#fff8d7" in page.hover_note.styleSheet()
         page.hover_at(QPointF(0, 0), QPointF(0, 0))
@@ -221,16 +224,38 @@ def main():
         assert editor_rect.left() >= viewport_rect.left() and editor_rect.right() <= viewport_rect.right()
         editor.finish(False)
         settle(app)
-        hover_anchor = QPointF(viewport_rect.right() - 5, viewport_rect.top() + 100)
-        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        hover_point = page.to_widget(note.rect).center()
+        page.hover_at(hover_point, page.mapToGlobal(hover_point))
         assert page.hover_note.width() == note_text_width(page.hover_note.fontMetrics(), "노란 메모")
-        assert page.hover_note.x() < hover_anchor.x()
         assert page.hover_note.x() + page.hover_note.width() <= viewport_rect.right() + 1
         note.set_info(content="짧은 줄\n이 줄은 더 긴 메모")
-        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        page.start_note(pymupdf.Point(100, 100), note.xref)
+        editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        assert editor.toPlainText() == "짧은 줄\n이 줄은 더 긴 메모"
+        assert editor.document().blockCount() == 2
+        assert editor.height() >= editor.document().size().height()
+        assert editor.verticalScrollBar().maximum() == 0
+        editor.finish(False)
+        settle(app)
+        page.hover_at(hover_point, page.mapToGlobal(hover_point))
         assert page.hover_note.width() == note_text_width(page.hover_note.fontMetrics(), "이 줄은 더 긴 메모")
+        wrapped_note = "긴 메모 " * 50
+        note.set_info(content=wrapped_note)
+        page.start_note(pymupdf.Point(100, 100), note.xref)
+        editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        assert editor.width() < note_text_width(editor.fontMetrics(), wrapped_note)
+        assert editor.height() >= editor.document().size().height()
+        assert editor.verticalScrollBar().maximum() == 0
+        editor.finish(False)
+        settle(app)
+        edge_note = win.doc[0].add_text_annot((page.page.rect.width - 10, 100), "가장자리")
+        edge_point = page.to_widget(edge_note.rect).center()
+        page.hover_at(edge_point, page.mapToGlobal(edge_point))
+        edge_anchor = page.mapToGlobal(page.to_widget(edge_note.rect).topRight().toPoint())
+        assert page.hover_note.x() < edge_anchor.x()
+        assert page.hover_note.x() + page.hover_note.width() <= viewport_rect.right() + 1
         note.set_info(content="긴 메모 " * 100)
-        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        page.hover_at(hover_point, page.mapToGlobal(hover_point))
         assert page.hover_note.width() <= viewport_rect.width() - 24
         assert page.hover_note.x() >= viewport_rect.left()
         assert page.hover_note.x() + page.hover_note.width() <= viewport_rect.right() + 1
