@@ -30,13 +30,14 @@ def settle(app):
 
 
 def saved_page(path):
-    return QSettings("pdf-editor", "PdfEditor").value(page_settings_key(path), type=int)
+    return QSettings(QSettings.IniFormat, QSettings.UserScope, "pdf-editor", "PdfEditor").value(
+        page_settings_key(path), type=int)
 
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
-        QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
+        pdf_editor.QSettings = lambda org, app: QSettings(QSettings.IniFormat, QSettings.UserScope, org, app)
         app = QApplication([])
         first = Path(directory) / "first.pdf"
         second = Path(directory) / "second.pdf"
@@ -56,9 +57,8 @@ def main():
         persisted = subprocess.check_output([
             sys.executable, "-c",
             "import sys; from PySide6.QtCore import QSettings; "
-            "QSettings.setDefaultFormat(QSettings.IniFormat); "
             "QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, sys.argv[1]); "
-            "print(QSettings('pdf-editor', 'PdfEditor').value(sys.argv[2], type=int))",
+            "print(QSettings(QSettings.IniFormat, QSettings.UserScope, 'pdf-editor', 'PdfEditor').value(sys.argv[2], type=int))",
             directory, page_settings_key(first),
         ], text=True)
         assert persisted.strip() == "2"

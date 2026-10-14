@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pymupdf
 from updater import APP_VERSION, Updater
-from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRectF, QPointF, QSettings, QSize, QTimer
+from PySide6.QtCore import Qt, QByteArray, QAbstractNativeEventFilter, QEvent, QObject, QRect, QRectF, QPoint, QPointF, QSettings, QSize, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QEventPoint, QFont, QFontDatabase, QIcon, QImage, QKeySequence,
                            QInputDevice, QPainter, QPalette, QPen, QPointingDevice, QPixmap, QPolygonF, QTextCursor,
                            QUndoCommand, QUndoStack)
@@ -141,6 +141,28 @@ PRESETS = {"pen": ["#426eff", "#ff4d4f", "#222222", "#12b886"],
 def rgb(hex_color):
     c = QColor(hex_color)
     return (c.redF(), c.greenF(), c.blueF())
+
+
+def saved_int(settings, key, default, minimum, maximum):
+    try:
+        value = int(settings.value(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def note_text_width(metrics, text):
+    return max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=0) + 28
+
+
+def note_x_and_width(anchor, bounds, desired_width, margin, offset=0):
+    margin = min(margin, max(0, (bounds.width() - 1) // 2))
+    width = min(desired_width, max(1, bounds.width() - 2 * margin))
+    left, right = bounds.left() + margin, bounds.right() + 1 - margin
+    x = anchor + offset
+    if x + width > right:
+        x = anchor - width - offset
+    return max(left, min(x, right - width)), width
 THUMB_ITEM_INSET = 12
 THUMB_REFIT_DELAY_MS = 100
 PAGE_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
@@ -560,14 +582,15 @@ class MoveAnnot(Cmd):
 class InlineEditor(QTextEdit):
     """페이지 위에 바로 뜨는 입력창. 포커스 잃거나 Ctrl+Enter면 commit, Esc면 취소. Enter는 줄바꿈."""
 
-    def __init__(self, parent, pos, text, font_px, style, on_done, width=None):
+    def __init__(self, parent, pos, text, font_px, style, on_done, width=None, note_bounds=None):
         super().__init__(parent)
         self.on_done, self.done, self.fixed_w = on_done, False, width
+        self.note_bounds, self.note_anchor = note_bounds, pos.x()
         self.base_style = style
         self.setAcceptRichText(False)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setLineWrapMode(QTextEdit.WidgetWidth if width else QTextEdit.NoWrap)
+        self.setLineWrapMode(QTextEdit.WidgetWidth if width or note_bounds else QTextEdit.NoWrap)
         self.set_font_px(font_px)
         self.setPlainText(text)
         self.moveCursor(QTextCursor.End)
@@ -585,7 +608,13 @@ class InlineEditor(QTextEdit):
 
     def fit(self):
         doc = self.document()
-        w = self.fixed_w or max(40, int(doc.idealWidth()) + 12)
+        if self.note_bounds is not None:
+            desired = max(40, note_text_width(self.fontMetrics(), self.toPlainText()))
+            x, w = note_x_and_width(self.note_anchor, self.note_bounds, desired, 8)
+            self.move(x, self.y())
+        else:
+            w = self.fixed_w or max(40, int(doc.idealWidth()) + 12)
+        self.resize(w, self.height())
         self.resize(w, max(24, int(doc.size().height()) + 12))
 
     def finish(self, ok):
@@ -764,7 +793,6 @@ class PageWidget(QWidget):
         self.hover_note = QLabel("", self, Qt.ToolTip)
         self.hover_note.setTextFormat(Qt.PlainText)
         self.hover_note.setWordWrap(True)
-        self.hover_note.setMaximumWidth(320)
         self.hover_note.setStyleSheet(self.win.theme["note_style"])
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -1175,11 +1203,22 @@ class PageWidget(QWidget):
         a = self.annot_at(pt, note_only=True, marker_pos=pos)
         content = a.info["content"] if a and a.type[0] != pymupdf.PDF_ANNOT_FREE_TEXT else ""
         if content:
-            if a.xref != self.tip_xref or not self.hover_note.isVisible() or self.hover_note.text() != content:
+            if self.hover_note.text() != content:
                 self.hover_note.setText(content)
-                self.hover_note.adjustSize()
-                self.hover_note.move(round(global_pos.x()) + 12, round(global_pos.y()) + 18)
-                self.hover_note.show()
+            anchor = global_pos.toPoint()
+            screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
+            viewport = self.win.scroll.viewport()
+            bounds = screen.availableGeometry().intersected(
+                QRect(viewport.mapToGlobal(QPoint(0, 0)), viewport.size()))
+            if bounds.isEmpty():
+                bounds = QRect(viewport.mapToGlobal(QPoint(0, 0)), viewport.size())
+            desired = note_text_width(self.hover_note.fontMetrics(), content)
+            x, width = note_x_and_width(anchor.x(), bounds, desired, 12, 12)
+            self.hover_note.setFixedWidth(width)
+            self.hover_note.adjustSize()
+            y = max(bounds.top() + 12, min(anchor.y() + 18, bounds.bottom() + 1 - self.hover_note.height() - 12))
+            self.hover_note.move(x, y)
+            self.hover_note.show()
             self.tip_xref = a.xref
         else:
             self.hover_note.hide()
@@ -1398,7 +1437,15 @@ class PageWidget(QWidget):
                                        lambda page: make_highlight(page, quads, color, text), "메모"))
             elif text:
                 win.undo.push(AddAnnot(win, pno, lambda page: make_note(page, pt, text), "메모"))
-        InlineEditor(self, pos, old, 13, style, done, width=220)
+        viewport = win.scroll.viewport()
+        visible = self.rect().intersected(QRect(self.mapFromGlobal(viewport.mapToGlobal(QPoint(0, 0))),
+                                               viewport.size()))
+        screen = QApplication.screenAt(self.mapToGlobal(pos)) or QApplication.primaryScreen()
+        screen_bounds = screen.availableGeometry()
+        visible = visible.intersected(QRect(self.mapFromGlobal(screen_bounds.topLeft()), screen_bounds.size()))
+        if visible.isEmpty():
+            visible = self.rect()
+        InlineEditor(self, pos, old, 13, style, done, note_bounds=visible)
 
 
 # ---------- 메인 창 ----------
@@ -1430,15 +1477,21 @@ class Win(QMainWindow):
         self._last_seen_page = None
         self.search_results = []
         self.search_index = -1
-        self.zoom, self.tool, self.width, self.font_size = 1.5, None, 2, FONT_SIZE
+        self.settings = QSettings("pdf-editor", "PdfEditor")
+        self.zoom, self.tool = 1.5, None
+        self.width = saved_int(self.settings, "tools/pen/width", 2, 1, 20)
+        self.font_size = saved_int(self.settings, "tools/text/font_size", FONT_SIZE, 6, 72)
         self.fit_mode = False
-        self.hl_width = DEFAULT_HIGHLIGHT_WIDTH
-        self.colors = dict(DEFAULT_COLORS)
+        self.hl_width = saved_int(self.settings, "tools/hl/width", DEFAULT_HIGHLIGHT_WIDTH, 1, 40)
+        self.colors = {}
+        for tool, default in DEFAULT_COLORS.items():
+            color = str(self.settings.value(f"tools/{tool}/color", default))
+            self.colors[tool] = color if QColor(color).isValid() else default
         self.undo = QUndoStack(self)
         self.undo.cleanChanged.connect(self.on_clean_changed)
         self.setAcceptDrops(True)
         self.resize(1200, 900)
-        saved_theme = str(QSettings("pdf-editor", "PdfEditor").value("theme", "다크"))
+        saved_theme = str(self.settings.value("theme", "다크"))
         self.theme_name = saved_theme if saved_theme in THEMES else "다크"
         self.theme = THEMES[self.theme_name]
         self.icon_targets = []
@@ -1764,7 +1817,7 @@ class Win(QMainWindow):
         font_layout.addWidget(font_label)
         self.font_spin = QSpinBox(minimum=6, maximum=72, value=self.font_size, suffix=" pt")
         self.font_spin.setFixedWidth(110)
-        self.font_spin.valueChanged.connect(lambda v: setattr(self, "font_size", v))
+        self.font_spin.valueChanged.connect(self.set_font_size)
         font_layout.addWidget(self.font_spin)
         layout.addWidget(self.font_section)
         layout.addStretch()
@@ -2317,13 +2370,22 @@ class Win(QMainWindow):
     def set_stroke_width(self, width):
         if self.tool == "hl":
             self.hl_width = width
+            key = "tools/hl/width"
         else:
             self.width = width
+            key = "tools/pen/width"
+        self.settings.setValue(key, width)
+        self.settings.sync()
         for pw in self.pages:
             if pw.hl_points or pw.pts:
                 if pw.pts:
                     pw.rebuild_ink_overlay()
                 pw.update()
+
+    def set_font_size(self, size):
+        self.font_size = size
+        self.settings.setValue("tools/text/font_size", size)
+        self.settings.sync()
 
     @property
     def temporary_eraser(self):
@@ -2430,7 +2492,10 @@ class Win(QMainWindow):
         self.color_btn.setIcon(QIcon(pm))
 
     def set_color(self, hex_color):
-        self.colors[self.color_key] = hex_color
+        key = self.color_key
+        self.colors[key] = hex_color
+        self.settings.setValue(f"tools/{key}/color", hex_color)
+        self.settings.sync()
         self.update_swatch()
 
     def pick_color(self):

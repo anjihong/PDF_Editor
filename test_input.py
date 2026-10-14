@@ -8,12 +8,13 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt
 from PySide6.QtGui import (QContextMenuEvent, QInputDevice, QPointingDevice, QTabletEvent,
                            QTouchEvent, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import pdf_editor
 from pdf_editor import HIDDEN, PointerPenInfo, Win, make_ink
 
 
@@ -27,6 +28,8 @@ def tablet_event(page, device, kind, x, y, pressure, button, buttons):
 def main():
     app = QApplication([])
     with tempfile.TemporaryDirectory() as directory:
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
+        pdf_editor.QSettings = lambda org, name: QSettings(QSettings.IniFormat, QSettings.UserScope, org, name)
         path = Path(directory) / "input.pdf"
         doc = pymupdf.open()
         first = doc.new_page(width=600, height=400)

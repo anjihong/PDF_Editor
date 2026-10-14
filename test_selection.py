@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
 import pdf_editor
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QSettings, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu
@@ -58,6 +58,8 @@ def menu_action(page, point, label):
 def main():
     app = QApplication([])
     with tempfile.TemporaryDirectory() as directory:
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
+        pdf_editor.QSettings = lambda org, name: QSettings(QSettings.IniFormat, QSettings.UserScope, org, name)
         path = Path(directory) / "selection.pdf"
         doc = pymupdf.open()
         page = doc.new_page(width=400, height=300)

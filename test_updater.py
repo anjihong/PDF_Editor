@@ -20,6 +20,7 @@ from PySide6.QtNetwork import QNetworkReply
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 import updater
+import pdf_editor
 from pdf_editor import InlineEditor, Win
 
 
@@ -338,8 +339,8 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     with tempfile.TemporaryDirectory(prefix="pdfeditor-tests-") as directory:
         root = Path(directory)
-        QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
+        pdf_editor.QSettings = lambda org, name: QSettings(QSettings.IniFormat, QSettings.UserScope, org, name)
         with patch.object(updater, "LOG_PATH", root / "update.log"):
             test_metadata(root)
             test_controller(app, root)

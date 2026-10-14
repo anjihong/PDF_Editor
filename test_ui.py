@@ -6,11 +6,12 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf
-from PySide6.QtCore import QPointF, QSettings, Qt
+import pdf_editor
+from PySide6.QtCore import QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider
 
-from pdf_editor import InlineEditor, PRESETS, THEMES, Win
+from pdf_editor import InlineEditor, PRESETS, THEMES, Win, note_text_width, note_x_and_width
 
 
 def settle(app):
@@ -20,9 +21,9 @@ def settle(app):
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
-        QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, directory)
-        settings = QSettings("pdf-editor", "PdfEditor")
+        pdf_editor.QSettings = lambda org, app: QSettings(QSettings.IniFormat, QSettings.UserScope, org, app)
+        settings = pdf_editor.QSettings("pdf-editor", "PdfEditor")
         settings.setValue("theme", "파스텔")
         path = Path(directory) / "workspace.pdf"
         doc = pymupdf.open()
@@ -192,6 +193,66 @@ def main():
         page.hover_at(QPointF(0, 0), QPointF(0, 0))
         assert not page.hover_note.isVisible()
 
+        # Note width follows the longest line and stays inside the document area.
+        assert note_x_and_width(100, QRect(0, 0, 800, 400), 180, 8) == (100, 180)
+        assert note_x_and_width(310, QRect(0, 0, 320, 400), 500, 12, 12) == (12, 296)
+        win.set_tool("note")
+        page.start_note(pymupdf.Point(80, 250))
+        editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        assert editor.width() == 40
+        editor.setPlainText("메모")
+        short_width = editor.width()
+        assert short_width == note_text_width(editor.fontMetrics(), "메모")
+        editor.setPlainText("메모\n이 줄은 조금 더 긴 메모")
+        assert editor.width() > short_width
+        assert editor.width() == note_text_width(editor.fontMetrics(), "이 줄은 조금 더 긴 메모")
+        editor.setPlainText("메모")
+        assert editor.width() == short_width
+        editor.finish(False)
+        settle(app)
+        edge = pymupdf.Point(page.page.rect.width - 10, 300)
+        page.start_note(edge)
+        editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        editor.setPlainText("메모 내용이 오른쪽 속성 패널로 넘어가면 안 됩니다")
+        assert editor.x() < page.to_widget(pymupdf.Rect(edge, edge)).x()
+        viewport = win.scroll.viewport()
+        viewport_rect = QRect(viewport.mapToGlobal(QPoint()), viewport.size())
+        editor_rect = QRect(editor.mapToGlobal(QPoint()), editor.size())
+        assert editor_rect.left() >= viewport_rect.left() and editor_rect.right() <= viewport_rect.right()
+        editor.finish(False)
+        settle(app)
+        hover_anchor = QPointF(viewport_rect.right() - 5, viewport_rect.top() + 100)
+        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        assert page.hover_note.width() == note_text_width(page.hover_note.fontMetrics(), "노란 메모")
+        assert page.hover_note.x() < hover_anchor.x()
+        assert page.hover_note.x() + page.hover_note.width() <= viewport_rect.right() + 1
+        note.set_info(content="짧은 줄\n이 줄은 더 긴 메모")
+        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        assert page.hover_note.width() == note_text_width(page.hover_note.fontMetrics(), "이 줄은 더 긴 메모")
+        note.set_info(content="긴 메모 " * 100)
+        page.hover_at(page.to_widget(note.rect).center(), hover_anchor)
+        assert page.hover_note.width() <= viewport_rect.width() - 24
+        assert page.hover_note.x() >= viewport_rect.left()
+        assert page.hover_note.x() + page.hover_note.width() <= viewport_rect.right() + 1
+        page.hover_at(QPointF(0, 0), QPointF(0, 0))
+
+        win.resize(700, 768)
+        settle(app)
+        win.fit_width()
+        settle(app)
+        page.start_note(pymupdf.Point(page.page.rect.width - 10, 300))
+        editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        blank_height = editor.height()
+        editor.setPlainText("긴 메모 " * 100)
+        viewport_rect = QRect(viewport.mapToGlobal(QPoint()), viewport.size())
+        editor_rect = QRect(editor.mapToGlobal(QPoint()), editor.size())
+        assert editor.width() < note_text_width(editor.fontMetrics(), editor.toPlainText())
+        assert editor.height() > blank_height
+        assert editor_rect.left() >= viewport_rect.left()
+        assert editor_rect.right() <= viewport_rect.right()
+        editor.finish(False)
+        settle(app)
+
         single = Path(directory) / "single.pdf"
         doc = pymupdf.open()
         doc.new_page(width=595, height=842)
@@ -208,17 +269,35 @@ def main():
 
         # 마지막 선택은 새 창에서도 복원된다.
         win.apply_theme("라이트")
+        win.set_tool("pen")
+        win.width_spin.setValue(7)
+        win.set_color(PRESETS["pen"][3])
+        win.set_tool("text")
+        win.set_color(PRESETS["text"][2])
         win.close()
         win = Win(str(path))
         win.show()
         settle(app)
         assert win.theme_name == "라이트"
+        assert (win.width, win.hl_width, win.font_size) == (7, 24, 26)
+        assert win.colors == {"pen": PRESETS["pen"][3], "hl": PRESETS["hl"][1],
+                              "text": PRESETS["text"][2]}
+        win.set_tool("hl")
+        assert win.width_spin.value() == 24
+        win.set_tool("pen")
+        assert win.width_spin.value() == 7
         win.close()
 
         # 저장된 값이 없는 최초 실행은 다크로 시작한다.
         settings.remove("theme")
+        settings.setValue("tools/pen/width", 999)
+        settings.setValue("tools/hl/width", "broken")
+        settings.setValue("tools/text/font_size", 2)
+        settings.setValue("tools/text/color", "not-a-color")
         win = Win(str(path))
         assert win.theme_name == "다크"
+        assert (win.width, win.hl_width, win.font_size) == (2, 20, 20)
+        assert win.colors["text"] == "#2864c6"
         win.close()
     print("ok")
 
