@@ -70,7 +70,6 @@ python pdf_editor.py [파일.pdf]
 
 Windows 실행 파일을 직접 빌드하려면 [메모먼트 꾸꾸꾸 글꼴](https://www.memoment.kr/font)을 내려받아 `memoment_kkukkukk.zip`의 `MemomentKkukkukk.ttf`를 `assets\local_fonts\`에 넣고 프로젝트 루트에서 `build.bat`을 실행하세요. 글꼴이 없으면 빌드가 중단됩니다. 가상 환경 생성, 의존성 설치, PyInstaller 빌드 후 `dist\PdfEditor.exe`가 만들어집니다.
 
-글꼴 파일은 Git에서 제외합니다. 제작사 이용 조건이 글꼴 파일 재배포를 금지하므로, 이 글꼴이 포함된 EXE와 글꼴 파일을 공개 저장소나 GitHub 릴리즈에 올리지 마세요.
 
 테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`, `python test_selection.py`, `python test_text_font.py`로 실행합니다.
 
