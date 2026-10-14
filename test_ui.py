@@ -231,6 +231,8 @@ def main():
         note.set_info(content="짧은 줄\n이 줄은 더 긴 메모")
         page.start_note(pymupdf.Point(100, 100), note.xref)
         editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
+        page.hover_at(hover_point, page.mapToGlobal(hover_point))
+        assert not page.hover_note.isVisible()
         assert editor.toPlainText() == "짧은 줄\n이 줄은 더 긴 메모"
         assert editor.document().blockCount() == 2
         assert editor.height() >= editor.document().size().height()
@@ -238,6 +240,7 @@ def main():
         editor.finish(False)
         settle(app)
         page.hover_at(hover_point, page.mapToGlobal(hover_point))
+        assert page.hover_note.isVisible()
         assert page.hover_note.width() == note_text_width(page.hover_note.fontMetrics(), "이 줄은 더 긴 메모")
         wrapped_note = "긴 메모 " * 50
         note.set_info(content=wrapped_note)

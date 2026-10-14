@@ -791,6 +791,7 @@ class PageWidget(QWidget):
         self.tool_cursor = Qt.ArrowCursor
         self.tip_xref = None
         self.selection_menu = None
+        self.note_editor = None
         self.hover_note = QLabel("", self, Qt.ToolTip)
         self.hover_note.setTextFormat(Qt.PlainText)
         self.hover_note.setWordWrap(True)
@@ -1194,6 +1195,10 @@ class PageWidget(QWidget):
             self.hover_at(e.position(), e.globalPosition())
 
     def hover_at(self, pos, _global_pos):
+        if self.note_editor is not None:
+            self.hover_note.hide()
+            self.tip_xref = None
+            return
         pt = self.to_pdf(pos)
         text_annot = self.annot_at(pt)
         is_text = (not self.win.temporary_eraser and text_annot is not None
@@ -1431,6 +1436,7 @@ class PageWidget(QWidget):
                             else self.to_widget(pymupdf.Rect(pt, pt)).topLeft().toPoint())
 
         def done(text):
+            self.note_editor = None
             if xref is not None:
                 if text and text != old:
                     win.undo.push(SetContent(win, pno, xref, text))
@@ -1448,7 +1454,7 @@ class PageWidget(QWidget):
         visible = visible.intersected(QRect(self.mapFromGlobal(screen_bounds.topLeft()), screen_bounds.size()))
         if visible.isEmpty():
             visible = self.rect()
-        InlineEditor(self, pos, old, 13, style, done, note_bounds=visible)
+        self.note_editor = InlineEditor(self, pos, old, 13, style, done, note_bounds=visible)
 
 
 # ---------- 메인 창 ----------
