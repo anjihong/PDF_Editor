@@ -68,13 +68,17 @@ pip install -r requirements.txt
 python pdf_editor.py [파일.pdf]
 ```
 
-Windows 실행 파일을 직접 빌드하려면 프로젝트 루트에서 `build.bat`을 실행하세요. 가상 환경 생성, 의존성 설치, PyInstaller 빌드 후 `dist\PdfEditor.exe`가 만들어집니다.
+Windows 실행 파일을 직접 빌드하려면 [메모먼트 꾸꾸꾸 글꼴](https://www.memoment.kr/font)을 내려받아 `memoment_kkukkukk.zip`의 `MemomentKkukkukk.ttf`를 `assets\local_fonts\`에 넣고 프로젝트 루트에서 `build.bat`을 실행하세요. 글꼴이 없으면 빌드가 중단됩니다. 가상 환경 생성, 의존성 설치, PyInstaller 빌드 후 `dist\PdfEditor.exe`가 만들어집니다.
 
-테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`, `python test_selection.py`로 실행합니다.
+글꼴 파일은 Git에서 제외합니다. 제작사 이용 조건이 글꼴 파일 재배포를 금지하므로, 이 글꼴이 포함된 EXE와 글꼴 파일을 공개 저장소나 GitHub 릴리즈에 올리지 마세요.
+
+테스트는 `python test_core.py`, `python test_highlight.py`, `python test_input.py`, `python test_page_restore.py`, `python test_ui.py`, `python test_selection.py`, `python test_text_font.py`로 실행합니다.
 
 업데이트 검증은 `python test_updater.py`로 실행합니다. 네트워크 오류·취소·저장 실패와 임시 폴더의 Windows EXE 교체·복구를 확인하며 실제 앱이나 릴리즈는 변경하지 않습니다.
 
 ### 릴리즈 절차
+
+아래 절차는 재배포 권한이 확인된 자산으로 빌드할 때만 적용합니다. 현재 메모먼트 글꼴을 포함한 로컬 빌드 결과물은 공개 릴리즈에 올리지 않습니다.
 
 1. `updater.py`의 `APP_VERSION`을 `1.1.1`처럼 세 자리 숫자 버전으로 변경합니다. Git 태그는 동일 버전에 `v`를 붙입니다(예: `v1.1.1`).
 2. 빌드 전 실행 중인 EXE 경로와 `python pdf_editor.py` 실행 여부를 확인합니다. 실행 중인 EXE가 빌드 대상과 같으면 별도 체크아웃에서 테스트와 `build.bat`을 실행합니다. 실행 중인 편집기는 저장하거나 종료하지 않습니다. 자동 실행에서는 `build.bat --no-pause`를 사용할 수 있습니다.

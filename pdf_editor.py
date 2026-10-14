@@ -6,6 +6,7 @@
 """
 import re
 import sys
+import unicodedata
 import ctypes
 import ctypes.wintypes
 import hashlib
@@ -204,6 +205,8 @@ QToolTip { background: %(tooltip)s; color: %(tooltip_text)s; border: 1px solid %
 """ % c
 
 ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "assets"   # exe(onefile)는 _MEIPASS에 풀림
+TEXT_FONT_PATH = ASSETS / "local_fonts" / "MemomentKkukkukk.ttf"
+TEXT_FONT_FAMILY = "MemomentKkukkukk"
 
 DARK_COLORS = dict(window="#20272d", text="#e8edef", chrome="#20272d", border="#364149",
                    hover="#354249", selected_bg="#244b4e", accent_text="#75e1d5", accent_border="#287f79",
@@ -236,13 +239,13 @@ THEMES = {
                chrome=("#20272d", "#e8edef", "#364149"),
                marker=("#f7dc87", "#b08338", "#70521e"),
                palette=("#20272d", "#e8edef", "#1e282e", "#273139", "#34434b", "#287f79", "#ffffff"),
-               note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+               note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px;font-family:'MemomentKkukkukk'}"),
     "라이트": dict(qss=theme_qss(LIGHT_COLORS), colors=LIGHT_COLORS, canvas="#e7ebeb",
                 page_border="#bcc5c8", shadow=5, shadow_color="#c4ccce", dark_title=False,
                 chrome=("#f8faf9", "#243139", "#d5dddf"),
                 marker=("#f7dc87", "#b08338", "#70521e"),
                 palette=("#f8faf9", "#243139", "#ffffff", "#f1f4f3", "#f7f9f8", "#25a89a", "#ffffff"),
-                note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px}"),
+               note_style="QTextEdit,QLabel{background:#fff8d7;color:#242c2f;border:1px solid #d7b963;border-radius:5px;padding:5px;font-family:'MemomentKkukkukk'}"),
 }
 
 # 화면 전체에 같은 굵기의 선형 아이콘을 사용한다. 파일 아이콘과 겹치지 않도록 UI 전용 경로로 둔다.
@@ -317,6 +320,61 @@ def text_rect(pt, text, fs=FONT_SIZE):
     return pymupdf.Rect(pt.x, pt.y, pt.x + w, pt.y + h)
 
 
+@cache
+def text_font():
+    return pymupdf.Font(fontbuffer=TEXT_FONT_PATH.read_bytes())
+
+
+def custom_text_rect(pt, text, fs=FONT_SIZE):
+    font = text_font()
+    lines = text.split("\n")
+    width = max(font.text_length(line, fontsize=fs) for line in lines) + 8
+    height = fs * (font.ascender - font.descender + 1.25 * (len(lines) - 1)) + 6
+    return pymupdf.Rect(pt.x, pt.y, pt.x + width, pt.y + height)
+
+
+def is_custom_text(doc, xref):
+    return doc.xref_get_key(xref, "PdfEditorFont") == ("name", "/MemomentKkukkukk")
+
+
+def annot_text_color(doc, xref):
+    da = doc.xref_get_key(xref, "DA")[1] or ""
+    match = re.search(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg", da)
+    return tuple(float(value) for value in match.groups()) if match else (0, 0, 0)
+
+
+def paint_custom_text(page, annot, text, fs, color):
+    """Use an embedded font in the FreeText appearance without changing page content."""
+    doc, rect, font = page.parent, annot.rect, text_font()
+    writer = pymupdf.TextWriter(page.rect)
+    for index, line in enumerate(text.split("\n")):
+        if line:
+            baseline = rect.y0 + 3 + fs * (font.ascender + 1.25 * index)
+            writer.append((rect.x0 + 4, baseline), line, font=font, fontsize=fs)
+
+    original_contents = doc.xref_get_key(page.xref, "Contents")[1]
+    existing = set(page.get_contents())
+    try:
+        writer.write_text(page, color=color)
+        added = [xref for xref in page.get_contents() if xref not in existing]
+        if len(added) != 1:
+            raise RuntimeError("텍스트 표시 데이터 생성 실패")
+        stream = doc.xref_stream(added[0])
+    finally:
+        doc.xref_set_key(page.xref, "Contents", original_contents)
+
+    font_name = re.search(rb"/([^\s/]+)\s+[\d.]+\s+Tf", stream).group(1).decode("ascii")
+    font_xref = next(item[0] for item in page.get_fonts(full=True) if item[4] == font_name and item[6] == 0)
+    cmap_xref = int(doc.xref_get_key(font_xref, "ToUnicode")[1].split()[0])
+    cmap = doc.xref_stream(cmap_xref)
+    if b"<0003> <00a0>" in cmap:
+        doc.update_stream(cmap_xref, cmap.replace(b"<0003> <00a0>", b"<0003> <0020>"))
+
+    appearance_xref = int(re.search(r"/N\s+(\d+)\s+0\s+R", doc.xref_get_key(annot.xref, "AP")[1]).group(1))
+    doc.update_stream(appearance_xref, stream)
+    doc.xref_set_key(appearance_xref, "Resources", f"<< /Font << /{font_name} {font_xref} 0 R >> >>")
+
+
 def make_ink(page, pts, color, width):
     a = page.add_ink_annot([[(p.x, p.y) for p in pts]])
     a.set_colors(stroke=color)
@@ -341,7 +399,11 @@ def make_highlight_ink(page, pts, color, width):
 
 
 def make_text(page, pt, text, color, fs=FONT_SIZE):
-    return page.add_freetext_annot(text_rect(pt, text, fs), text, fontsize=fs, text_color=color)
+    text = unicodedata.normalize("NFC", text)
+    annot = page.add_freetext_annot(custom_text_rect(pt, text, fs), text, fontsize=fs, text_color=color)
+    paint_custom_text(page, annot, text, fs, color)
+    page.parent.xref_set_key(annot.xref, "PdfEditorFont", "/MemomentKkukkukk")
+    return annot
 
 
 def annot_fontsize(doc, xref):
@@ -359,14 +421,24 @@ def make_note(page, pt, text):
 def set_hidden(page, xref, hidden):
     a = page.load_annot(xref)
     a.set_flags(a.flags | HIDDEN if hidden else a.flags & ~HIDDEN)
+    if not hidden and is_custom_text(page.parent, xref):
+        # Restoring flags leaves MuPDF's live FreeText appearance on its fallback font.
+        fs, color, text = annot_fontsize(page.parent, xref), annot_text_color(page.parent, xref), a.info["content"]
+        a.update()
+        paint_custom_text(page, a, text, fs, color)
 
 
 def set_content(page, xref, text, rect=None, fontsize=None):
     a = page.load_annot(xref)
+    custom = is_custom_text(page.parent, xref)
+    if custom:
+        text = unicodedata.normalize("NFC", text)
     a.set_info(content=text)
     if rect is not None:
         a.set_rect(rect)
     a.update(fontsize=fontsize) if fontsize else a.update()
+    if custom:
+        paint_custom_text(page, a, text, annot_fontsize(page.parent, xref), annot_text_color(page.parent, xref))
 
 
 def purge_hidden(doc):
@@ -454,9 +526,13 @@ class MoveAnnot(Cmd):
         self.xref, self.old_rect, self.new_rect = xref, old_rect, new_rect
 
     def apply(self, rect):
-        a = self.page.load_annot(self.xref)
+        page = self.page  # Annot keeps only a weak reference to its Page.
+        a = page.load_annot(self.xref)
         a.set_rect(rect)
         a.update()
+        if is_custom_text(self.win.doc, self.xref):
+            paint_custom_text(page, a, a.info["content"], annot_fontsize(self.win.doc, self.xref),
+                              annot_text_color(self.win.doc, self.xref))
         self.refresh()
 
     def redo(self):
@@ -474,14 +550,12 @@ class InlineEditor(QTextEdit):
     def __init__(self, parent, pos, text, font_px, style, on_done, width=None):
         super().__init__(parent)
         self.on_done, self.done, self.fixed_w = on_done, False, width
+        self.base_style = style
         self.setAcceptRichText(False)
-        self.setStyleSheet(style)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setLineWrapMode(QTextEdit.WidgetWidth if width else QTextEdit.NoWrap)
-        f = self.font()
-        f.setPixelSize(font_px)
-        self.setFont(f)
+        self.set_font_px(font_px)
         self.setPlainText(text)
         self.moveCursor(QTextCursor.End)
         self.textChanged.connect(self.fit)
@@ -493,9 +567,7 @@ class InlineEditor(QTextEdit):
     def set_font_px(self, px):
         if self.done:
             return
-        f = self.font()
-        f.setPixelSize(px)
-        self.setFont(f)
+        self.setStyleSheet(f"{self.base_style}\nQTextEdit {{ font-size: {px}px; }}")
         self.fit()
 
     def fit(self):
@@ -1243,7 +1315,9 @@ class PageWidget(QWidget):
     def start_text(self, pt, xref=None):
         win, pno, z = self.win, self.pno, self.zoom
         c = win.colors["text"]
-        style = f"QTextEdit{{background:transparent;color:{c};border:1px dashed {c};padding:0}}"
+        custom = xref is None or is_custom_text(win.doc, xref)
+        family = f"font-family:'{TEXT_FONT_FAMILY}';" if custom else ""
+        style = f"QTextEdit{{background:transparent;color:{c};border:1px dashed {c};padding:0;{family}}}"
         page = self.page   # Annot이 Page를 약참조하므로 살려둠
         if xref is not None:
             a = page.load_annot(xref)
@@ -1261,14 +1335,14 @@ class PageWidget(QWidget):
             if xref is not None:
                 set_hidden(self.page, xref, False)
                 if text and (text != old or fs != fs0):
-                    win.undo.push(SetContent(win, pno, xref, text, text_rect(rect.top_left, text, fs), "텍스트 편집", fs))
+                    new_rect = custom_text_rect(rect.top_left, text, fs) if custom else text_rect(rect.top_left, text, fs)
+                    win.undo.push(SetContent(win, pno, xref, text, new_rect, "텍스트 편집", fs))
                 else:
                     self.invalidate(thumb=False)
             elif text:
                 col = rgb(win.colors["text"])
                 win.undo.push(AddAnnot(win, pno, lambda page: make_text(page, pt, text, col, fs), "텍스트"))
         ed = InlineEditor(self, pos, old, round(win.font_size * z), style, done)
-        ed.setFont(win.base_font)
         ed.set_font_px(round(win.font_size * z))
         win.font_spin.valueChanged.connect(lambda v: ed.set_font_px(round(v * z)))
 
@@ -1346,6 +1420,8 @@ class Win(QMainWindow):
         if sys.platform == "win32" and malgun.exists() and "Malgun Gothic" not in QFontDatabase.families():
             QFontDatabase.addApplicationFont(str(malgun))
         self.base_font = QFont("Malgun Gothic", 10)
+        if QFontDatabase.addApplicationFont(str(TEXT_FONT_PATH)) < 0:
+            raise RuntimeError(f"메모먼트 글꼴을 불러올 수 없습니다: {TEXT_FONT_PATH}")
         QApplication.setFont(self.base_font)
         self.apply_application_theme()
 

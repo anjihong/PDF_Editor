@@ -1,12 +1,16 @@
 @echo off
 cd /d %~dp0
+if not exist assets\local_fonts\MemomentKkukkukk.ttf (
+    echo Missing assets\local_fonts\MemomentKkukkukk.ttf. Extract it from memoment_kkukkukk.zip for local builds.
+    exit /b 1
+)
 if not exist .venv python -m venv .venv
 if errorlevel 1 exit /b 1
 .venv\Scripts\python -m pip install -q -r requirements.txt
 if errorlevel 1 exit /b 1
 rem Keep third-party DLLs from the caller's PATH out of PyInstaller's dependency scan.
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem"
-.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name PdfEditor --icon assets\app.ico --add-data "assets\app.ico;assets" --add-data "updater.ps1;." --additional-hooks-dir hooks --exclude-module PySide6.QtPdf --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtVirtualKeyboard pdf_editor.py
+.venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed --name PdfEditor --icon assets\app.ico --add-data "assets\app.ico;assets" --add-data "assets\local_fonts\MemomentKkukkukk.ttf;assets\local_fonts" --add-data "updater.ps1;." --additional-hooks-dir hooks --exclude-module PySide6.QtPdf --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtVirtualKeyboard pdf_editor.py
 if errorlevel 1 exit /b 1
 if not exist dist\PdfEditor.exe exit /b 1
 echo.
