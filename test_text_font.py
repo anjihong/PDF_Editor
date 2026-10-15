@@ -8,9 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pymupdf
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QFontDatabase, QFontInfo, QFontMetricsF, QUndoStack
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QStatusBar, QWidget
 
-from pdf_editor import (InlineEditor, MoveAnnot, SetContent, TEXT_FONT_FAMILY,
+from pdf_editor import (InlineEditor, MoveAnnot, SetContent, Win, TEXT_FONT_FAMILY,
                         TEXT_FONT_PATH, THEMES, custom_text_rect, is_custom_text,
                         make_text, set_hidden, text_font)
 
@@ -81,6 +81,32 @@ def main():
         assert len(embedded) > 100_000
         assert result.load_annot(legacy.xref)._getAP() == legacy_ap
         reopened.close()
+
+        # Saving must leave the live font cache and undo xrefs usable, across pages.
+        win.path, win.undo = str(path), stack
+        status = QStatusBar()
+        win.statusBar = lambda: status
+        doc.new_page()
+        page = doc[0]
+        sample = "음수 - 양수\n부호가 양수이면 오버플로우"
+        for cycle in range(3):
+            original_fonts = page.get_fonts()
+            assert Win.save(win)
+            assert page.get_fonts() == original_fonts
+            assert page.load_annot(xref).info["content"] == edited
+            stack.undo()
+            stack.redo()
+            set_hidden(page, xref, True)
+            set_hidden(page, xref, False)
+            assert edited in page.get_text()
+            other = doc[1]
+            new = make_text(other, pymupdf.Point(40, 50 + cycle * 80), sample, (0, 0, 1), 16)
+            assert sample in other.get_text()
+            assert is_custom_text(doc, new.xref)
+        assert Win.save(win)
+        with pymupdf.open(path) as reopened:
+            assert edited in reopened[0].get_text()
+            assert reopened[1].get_text().count(sample) == 3
 
     parent = QWidget()
     parent.setStyleSheet("QTextEdit { font-size: 10pt; }")

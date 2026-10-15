@@ -2160,7 +2160,8 @@ class Win(QMainWindow):
         if not self.doc:
             return False
         purged = purge_hidden(self.doc)
-        self.doc.save(self.path, garbage=3, deflate=True)
+        # Keep xrefs stable for the live font cache and undo commands after saving.
+        self.doc.save(self.path, garbage=1, deflate=True)
         if purged:
             self.undo.clear()   # 숨긴 주석이 사라져 이전 히스토리 무효
         else:
