@@ -9,7 +9,7 @@ import pymupdf
 import pdf_editor
 from PySide6.QtCore import QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSlider, QTextEdit
 
 from pdf_editor import InlineEditor, PRESETS, THEMES, Win, note_text_width, note_x_and_width
 
@@ -204,12 +204,20 @@ def main():
         page.start_note(pymupdf.Point(80, 250))
         editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
         assert editor.width() == 40
+        assert editor.lineWrapMode() == QTextEdit.NoWrap
+        for char in "메모를 옆으로 계속 입력":
+            editor.insertPlainText(char)
+            assert editor.lineWrapMode() == QTextEdit.NoWrap
+            assert editor.document().firstBlock().layout().lineCount() == 1
         editor.setPlainText("메모")
         short_width = editor.width()
         assert short_width == note_text_width(editor.fontMetrics(), "메모")
+        assert editor.lineWrapMode() == QTextEdit.NoWrap
         editor.setPlainText("메모\n이 줄은 조금 더 긴 메모")
         assert editor.width() > short_width
         assert editor.width() == note_text_width(editor.fontMetrics(), "이 줄은 조금 더 긴 메모")
+        assert editor.document().blockCount() == 2
+        assert editor.lineWrapMode() == QTextEdit.NoWrap
         editor.setPlainText("메모")
         assert editor.width() == short_width
         editor.finish(False)
@@ -248,6 +256,11 @@ def main():
         page.start_note(pymupdf.Point(100, 100), note.xref)
         editor = next(ed for ed in page.findChildren(InlineEditor) if not ed.done)
         assert editor.width() < note_text_width(editor.fontMetrics(), wrapped_note)
+        assert editor.lineWrapMode() == QTextEdit.WidgetWidth
+        assert editor.document().firstBlock().layout().lineCount() > 1
+        editor.setPlainText("짧은 메모")
+        assert editor.lineWrapMode() == QTextEdit.NoWrap
+        assert editor.document().firstBlock().layout().lineCount() == 1
         assert editor.height() >= editor.document().size().height()
         assert editor.verticalScrollBar().maximum() == 0
         editor.finish(False)

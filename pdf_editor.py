@@ -626,6 +626,9 @@ class InlineEditor(QTextEdit):
         if self.note_bounds is not None:
             desired = max(40, note_text_width(self.fontMetrics(), self.toPlainText()))
             x, w = note_x_and_width(self.note_anchor, self.note_bounds, desired, 8)
+            wrap = QTextEdit.NoWrap if desired <= w else QTextEdit.WidgetWidth
+            if self.lineWrapMode() != wrap:
+                self.setLineWrapMode(wrap)
             self.move(x, self.y())
         else:
             w = self.fixed_w or max(40, int(doc.idealWidth()) + 12)
