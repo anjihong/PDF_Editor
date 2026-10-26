@@ -784,6 +784,7 @@ class PageWidget(QWidget):
         self.display_list = None
         self.ink_overlay = None
         self.note_markers = None
+        self.annot_regions = None
         self.words = None    # get_text("words") 캐시
         self.text_chars = None  # 선택과 형광펜용 글자 좌표 캐시
         self.text_content = ""
@@ -831,6 +832,7 @@ class PageWidget(QWidget):
         if content:
             self.display_list = None
             self.note_markers = None
+            self.annot_regions = None
         r, s = self.page.rect, self.win.theme["shadow"]
         self.setFixedSize(int(r.width * self.zoom) + s, int(r.height * self.zoom) + s)
         self.update()
@@ -964,21 +966,34 @@ class PageWidget(QWidget):
         r, z = rect * self.page.rotation_matrix, self.zoom
         return QRectF(r.x0 * z, r.y0 * z, r.width * z, r.height * z)
 
+    def get_annot_regions(self):
+        if self.annot_regions is None:
+            page = self.page
+            regions = []
+            for a in page.annots():
+                if a.flags & HIDDEN:
+                    continue
+                kind, rect, content = a.type[0], a.rect, a.info["content"]
+                vertices = a.vertices if kind == pymupdf.PDF_ANNOT_HIGHLIGHT else None
+                hit_rects = [pymupdf.Quad(*vertices[i:i + 4]).rect
+                             for i in range(0, len(vertices), 4)] if vertices else [rect]
+                # Cache geometry, not native Annot handles tied to a Page's lifetime.
+                regions.append((a.xref, kind, rect, content, hit_rects))
+            self.annot_regions = regions
+        return self.annot_regions
+
     def annot_at(self, pt, note_only=False, marker_pos=None):
         self._page = self.page   # Annot은 Page를 약참조하므로 반환 후에도 살려둠
-        for a in reversed(list(self._page.annots())):
-            if a.flags & HIDDEN or note_only and not a.info["content"]:
+        for xref, kind, rect, content, hit_rects in reversed(self.get_annot_regions()):
+            if note_only and not content:
                 continue
-            hit = a.rect.contains(pt)
-            if a.type[0] == pymupdf.PDF_ANNOT_HIGHLIGHT and a.vertices:
-                hit = any(pymupdf.Quad(*a.vertices[i:i + 4]).rect.contains(pt)
-                          for i in range(0, len(a.vertices), 4))
-            if not hit and marker_pos is not None and a.info["content"] and a.type[0] not in (
+            hit = any(r.contains(pt) for r in hit_rects)
+            if not hit and marker_pos is not None and content and kind not in (
                     pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT):
-                r = self.to_widget(a.rect)
+                r = self.to_widget(rect)
                 hit = QRectF(r.right() - 7, r.top() - 9, 16, 14).contains(marker_pos)
             if hit:
-                return a
+                return self._page.load_annot(xref)
         return None
 
     def paintEvent(self, _e):
@@ -1006,11 +1021,8 @@ class PageWidget(QWidget):
             p.drawRect(self.to_widget(rect))
         # 메모 표식: 내용 있는 형광펜/펜 주석 우상단에 말풍선
         if self.note_markers is None:
-            page = self.page
-            self.note_markers = [a.rect for a in page.annots()
-                                 if a.info["content"]
-                                 and a.type[0] not in (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT)
-                                 and not a.flags & HIDDEN]
+            self.note_markers = [rect for _, kind, rect, content, _ in self.get_annot_regions()
+                                 if content and kind not in (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT)]
         for rect in self.note_markers:
             r = self.to_widget(rect)
             m = QRectF(r.right() - 7, r.top() - 9, 16, 14)
@@ -1215,7 +1227,7 @@ class PageWidget(QWidget):
             self.tip_xref = None
             return
         pt = self.to_pdf(pos)
-        text_annot = self.annot_at(pt)
+        text_annot = self.annot_at(pt) if self.win.tool in (None, "text") else None
         is_text = (not self.win.temporary_eraser and text_annot is not None
                    and text_annot.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT
                    and self.win.tool in (None, "text"))
@@ -2028,6 +2040,8 @@ class Win(QMainWindow):
         for pw in self.pages:
             for xref in pw.erased or []:
                 set_hidden(pw.page, xref, False)
+            if pw.erased:
+                pw.invalidate(thumb=False)
             pw.pen_input = None
             pw.pts = []
             pw.ink_overlay = None

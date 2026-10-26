@@ -186,6 +186,7 @@ def main():
 
         note = win.doc[0].add_text_annot((100, 100), "노란 메모")
         page = win.pages[0]
+        page.invalidate(thumb=False)
         page.hover_at(page.to_widget(note.rect).center(), QPointF(10, 10))
         assert page.hover_note.isVisible() and "#fff8d7" in page.hover_note.styleSheet()
         hover_pos = page.hover_note.pos()
@@ -252,6 +253,7 @@ def main():
         editor.finish(False)
         settle(app)
         edge_note = win.doc[0].add_text_annot((page.page.rect.width - 10, 100), "가장자리")
+        page.invalidate(thumb=False)
         edge_point = page.to_widget(edge_note.rect).center()
         page.hover_at(edge_point, page.mapToGlobal(edge_point))
         edge_anchor = page.mapToGlobal(page.to_widget(edge_note.rect).topRight().toPoint())
