@@ -67,15 +67,12 @@ def segments_distance_sq(a, b, c, d):
                point_segment_distance_sq(c, a, b), point_segment_distance_sq(d, a, b))
 
 
-def ink_near_path(annot, start, end, radius):
-    width = annot.border.get("width", 1) or 1
+def ink_near_path(rect, strokes, width, start, end, radius):
     reach = radius + width / 2
-    if not annot.rect.intersects(pymupdf.Rect(min(start[0], end[0]) - reach,
-                                               min(start[1], end[1]) - reach,
-                                               max(start[0], end[0]) + reach,
-                                               max(start[1], end[1]) + reach)):
+    if (rect.x1 < min(start[0], end[0]) - reach or rect.x0 > max(start[0], end[0]) + reach
+            or rect.y1 < min(start[1], end[1]) - reach or rect.y0 > max(start[1], end[1]) + reach):
         return False
-    for stroke in annot.vertices or []:
+    for stroke in strokes:
         for first, second in zip(stroke, stroke[1:]):
             if segments_distance_sq(start, end, first, second) <= reach * reach:
                 return True
@@ -339,10 +336,11 @@ def segment_rect_hits(start, end, rects, tolerance=0):
     left, right = sorted((start.x, end.x))
     top, bottom = sorted((start.y, end.y))
     for index, bounds in enumerate(rects):
+        if (bounds.x1 + tolerance < left or bounds.x0 - tolerance > right
+                or bounds.y1 + tolerance < top or bounds.y0 - tolerance > bottom):
+            continue
         rect = pymupdf.Rect(bounds.x0 - tolerance, bounds.y0 - tolerance,
                             bounds.x1 + tolerance, bounds.y1 + tolerance)
-        if rect.x1 < left or rect.x0 > right or rect.y1 < top or rect.y0 > bottom:
-            continue
         if rect.contains(start) or rect.contains(end):
             yield index
             continue
@@ -827,7 +825,7 @@ class PageWidget(QWidget):
     def zoom(self):
         return self.win.zoom
 
-    def invalidate(self, thumb=True, content=True):
+    def invalidate(self, thumb=True, content=True, annotations=True):
         self.win.drop_page_image(self.pno)
         self.img = None
         self.hover_note.hide()
@@ -835,7 +833,8 @@ class PageWidget(QWidget):
         if content:
             self.display_list = None
             self.note_markers = None
-            self.annot_regions = None
+            if annotations:
+                self.annot_regions = None
         r, s = self.page.rect, self.win.theme["shadow"]
         self.setFixedSize(int(r.width * self.zoom) + s, int(r.height * self.zoom) + s)
         self.update()
@@ -872,14 +871,17 @@ class PageWidget(QWidget):
 
     def text_char_at(self, pt, inside=False):
         chars = self.get_text_chars()
+        x, y = pt.x, pt.y
         if inside:
-            chars = [(i, item) for i, item in enumerate(chars) if item[0].contains(pt)]
+            chars = [(i, item) for i, item in enumerate(chars)
+                     if item[0].x0 <= x <= item[0].x1 and item[0].y0 <= y <= item[0].y1
+                     and item[0].contains(pt)]
             if not chars:
                 return None
         else:
             chars = enumerate(chars)
-        return min(chars, key=lambda entry: (max(entry[1][0].x0 - pt.x, 0, pt.x - entry[1][0].x1) ** 2
-                                              + max(entry[1][0].y0 - pt.y, 0, pt.y - entry[1][0].y1) ** 2),
+        return min(chars, key=lambda entry: (max(entry[1][0].x0 - x, 0, x - entry[1][0].x1) ** 2
+                                              + max(entry[1][0].y0 - y, 0, y - entry[1][0].y1) ** 2),
                    default=(None,))[0]
 
     def select_to(self, pos):
@@ -887,6 +889,8 @@ class PageWidget(QWidget):
         if end is None or self.selection_anchor is None:
             return
         first, last = sorted((self.selection_anchor, end))
+        if self.selection_range == (first, last):
+            return
         self.selection_range = first, last
         chars = self.get_text_chars()
         quads = []
@@ -973,21 +977,25 @@ class PageWidget(QWidget):
         if self.annot_regions is None:
             page = self.page
             regions = []
-            for a in page.annots():
-                if a.flags & HIDDEN:
-                    continue
-                kind, rect, content = a.type[0], a.rect, a.info["content"]
-                vertices = a.vertices if kind == pymupdf.PDF_ANNOT_HIGHLIGHT else None
-                hit_rects = [pymupdf.Quad(*vertices[i:i + 4]).rect
-                             for i in range(0, len(vertices), 4)] if vertices else [rect]
-                # Cache geometry, not native Annot handles tied to a Page's lifetime.
-                regions.append((a.xref, kind, rect, content, hit_rects))
+            a = page.first_annot
+            while a is not None:
+                kind = a.type[0]
+                if kind not in (pymupdf.PDF_ANNOT_LINK, pymupdf.PDF_ANNOT_POPUP, pymupdf.PDF_ANNOT_WIDGET) and not a.flags & HIDDEN:
+                    rect, content = a.rect, a.info["content"]
+                    vertices = a.vertices if kind in (pymupdf.PDF_ANNOT_HIGHLIGHT, pymupdf.PDF_ANNOT_INK) else None
+                    hit_rects = [rect]
+                    if kind == pymupdf.PDF_ANNOT_HIGHLIGHT and vertices:
+                        hit_rects = [pymupdf.Quad(*vertices[i:i + 4]).rect for i in range(0, len(vertices), 4)]
+                    ink = (vertices or [], a.border.get("width", 1) or 1) if kind == pymupdf.PDF_ANNOT_INK else None
+                    # Cache geometry, not native Annot handles tied to a Page's lifetime.
+                    regions.append((a.xref, kind, rect, content, hit_rects, ink))
+                a = a.next
             self.annot_regions = regions
         return self.annot_regions
 
     def annot_at(self, pt, note_only=False, marker_pos=None):
         self._page = self.page   # Annot은 Page를 약참조하므로 반환 후에도 살려둠
-        for xref, kind, rect, content, hit_rects in reversed(self.get_annot_regions()):
+        for xref, kind, rect, content, hit_rects, _ink in reversed(self.get_annot_regions()):
             if note_only and not content:
                 continue
             hit = any(r.contains(pt) for r in hit_rects)
@@ -1024,7 +1032,7 @@ class PageWidget(QWidget):
             p.drawRect(self.to_widget(rect))
         # 메모 표식: 내용 있는 형광펜/펜 주석 우상단에 말풍선
         if self.note_markers is None:
-            self.note_markers = [rect for _, kind, rect, content, _ in self.get_annot_regions()
+            self.note_markers = [rect for _, kind, rect, content, _, _ink in self.get_annot_regions()
                                  if content and kind not in (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_TEXT)]
         for rect in self.note_markers:
             r = self.to_widget(rect)
@@ -1192,10 +1200,10 @@ class PageWidget(QWidget):
         self._page = self.page
         radius = ERASER_RADIUS_PX / self.zoom
         start_xy, end_xy = (start.x, start.y), (pt.x, pt.y)
-        hits = [a.xref for a in self._page.annots()
-                if not a.flags & HIDDEN and a.xref not in self.erase_excluded
-                and a.type[0] == pymupdf.PDF_ANNOT_INK
-                and ink_near_path(a, start_xy, end_xy, radius)]
+        regions = self.get_annot_regions()
+        hits = [xref for xref, _kind, rect, _content, _hit_rects, ink in regions
+                if ink is not None and xref not in self.erase_excluded
+                and ink_near_path(rect, ink[0], ink[1], start_xy, end_xy, radius)]
         if not hits:
             a = self.annot_at(pt)  # 다른 주석 종류는 기존의 정확한 영역 판정을 유지
             if a is not None and a.xref not in self.erase_excluded:
@@ -1205,7 +1213,8 @@ class PageWidget(QWidget):
                 self.erased.append(xref)
                 set_hidden(self._page, xref, True)   # 즉시 숨김, 커맨드는 릴리즈 때 한 번에
         if hits:
-            self.invalidate(thumb=False)
+            self.annot_regions = [region for region in regions if region[0] not in hits]
+            self.invalidate(thumb=False, annotations=False)
 
     def mouseMoveEvent(self, e):
         mode = self.mouse_input_mode(e)
@@ -1270,14 +1279,18 @@ class PageWidget(QWidget):
     def start_highlight(self, pos):
         self.hl_points = [pos]
         self.hl_chars = set()
+        self.preview = []
         self._match_highlight_segment(pos, pos)
         self.update()
 
     def _match_highlight_segment(self, start, end):
         tolerance = 1 / self.zoom
         chars = self.get_text_chars()
+        previous_count = len(self.hl_chars)
         self.hl_chars.update(segment_rect_hits(self.to_pdf(start), self.to_pdf(end),
                                                (item[0] for item in chars), tolerance))
+        if len(self.hl_chars) == previous_count:
+            return
         groups = []
         previous_end = None
         for index in sorted(self.hl_chars):
