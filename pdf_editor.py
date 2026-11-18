@@ -169,6 +169,7 @@ def note_x_and_width(anchor, bounds, desired_width, margin, offset=0):
 THUMB_ITEM_INSET = 12
 THUMB_REFIT_DELAY_MS = 100
 PAGE_IMAGE_CACHE_BYTES = 256 * 1024 * 1024
+FULL_PAGE_PIXELS = 8 * 1024 * 1024
 
 def theme_qss(c):
     return """
@@ -490,9 +491,17 @@ def purge_hidden(doc):
     return n
 
 
-def to_qimage(source, zoom):
-    pix = source.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
-    return QImage(pix.samples_mv, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+def to_qimage(source, zoom, clip=None):
+    matrix = pymupdf.Matrix(zoom, zoom)
+    origin = QPoint()
+    if clip is not None:
+        # 래스터 좌표를 보이는 구간 근처에 둬 긴 페이지 끝에서도 정밀도를 유지한다.
+        origin = QPoint(math.floor(clip.x0 * zoom), math.floor(clip.y0 * zoom))
+        matrix.e, matrix.f = -origin.x(), -origin.y()
+    pix = source.get_pixmap(matrix=matrix, clip=clip)
+    image = QImage(pix.samples_mv, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+    image.setOffset(origin + QPoint(pix.x, pix.y))
+    return image
 
 
 # ---------- Undo 커맨드 ----------
@@ -781,7 +790,10 @@ class PageWidget(QWidget):
     def __init__(self, win, pno):
         super().__init__()
         self.win, self.pno = win, pno
+        self.zoom = win.zoom
+        self.page_size = self.page.rect
         self.img = None
+        self.image_region = QRectF()
         self.display_list = None
         self.ink_overlay = None
         self.note_markers = None
@@ -815,15 +827,11 @@ class PageWidget(QWidget):
         self.hover_note.setStyleSheet(self.win.theme["note_style"])
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.invalidate(thumb=False)
+        self.setFixedSize(0, 0)  # 문서 레이아웃에서 첫 너비 맞춤이 끝나면 표시한다.
 
     @property
     def page(self):
         return self.win.doc[self.pno]
-
-    @property
-    def zoom(self):
-        return self.win.zoom
 
     def invalidate(self, thumb=True, content=True, annotations=True):
         self.win.drop_page_image(self.pno)
@@ -835,8 +843,11 @@ class PageWidget(QWidget):
             self.note_markers = None
             if annotations:
                 self.annot_regions = None
-        r, s = self.page.rect, self.win.theme["shadow"]
-        self.setFixedSize(int(r.width * self.zoom) + s, int(r.height * self.zoom) + s)
+        r, s = self.page_size, self.win.theme["shadow"]
+        width = math.ceil(r.width * self.zoom)
+        if self.win.fit_mode:
+            width = min(width, self.win._fit_width)
+        self.setFixedSize(width + s, math.ceil(r.height * self.zoom) + s)
         self.update()
         if thumb:
             self.win.schedule_thumbnail(self.pno)
@@ -933,14 +944,19 @@ class PageWidget(QWidget):
                 return True
         return super().eventFilter(obj, e)
 
-    def render(self, zoom):
+    def render(self, zoom, clip=None):
         if self.display_list is None:
             self.display_list = self.page.get_displaylist()
-        return to_qimage(self.display_list, zoom)
+        return to_qimage(self.display_list, zoom, clip)
+
+    def needs_partial_render(self):
+        dpr = self.devicePixelRatioF()
+        return (self.width() * self.height() * dpr ** 2 > FULL_PAGE_PIXELS
+                or max(self.width(), self.height()) * dpr >= 32767)
 
     def rebuild_ink_overlay(self):
         self.ink_overlay = None
-        if len(self.pts) < 2:
+        if len(self.pts) < 2 or self.needs_partial_render():
             return
         dpr = self.devicePixelRatioF()
         self.ink_overlay = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
@@ -1007,18 +1023,31 @@ class PageWidget(QWidget):
                 return self._page.load_annot(xref)
         return None
 
-    def paintEvent(self, _e):
+    def paintEvent(self, event):
         dpr = self.devicePixelRatioF()
-        if self.img is None:
-            self.img = self.render(self.zoom * dpr)
-            self.img.setDevicePixelRatio(dpr)
-        self.win.cache_page_image(self.pno)
         theme, s = self.win.theme, self.win.theme["shadow"]
         paper = QRectF(0, 0, self.width() - s, self.height() - s)
+        region = paper
+        dirty = paper.intersected(QRectF(event.rect()))
+        clip = None
+        if self.needs_partial_render():
+            viewport = self.win.scroll.viewport()
+            visible = QRectF(self.mapFrom(viewport, QPoint()), viewport.size())
+            region = paper.intersected(visible)
+            dirty = dirty.intersected(region)
+            clip = pymupdf.Rect(region.left(), region.top(), region.right(), region.bottom()) / self.zoom
+        if not dirty.isEmpty():
+            if (self.img is None or self.img.devicePixelRatio() != dpr
+                    or not self.image_region.contains(dirty)):
+                self.img = self.render(self.zoom * dpr, clip)
+                self.img.setDevicePixelRatio(dpr)
+                self.image_region = region
+            self.win.cache_page_image(self.pno)
         p = QPainter(self)
         if s:
             p.fillRect(paper.translated(s, s), QColor(theme["shadow_color"]))
-        p.drawImage(0, 0, self.img)
+        if self.img is not None:
+            p.drawImage(QPointF(self.img.offset()) / dpr, self.img)
         p.setPen(QPen(QColor(theme["page_border"]), 1))
         p.drawRect(paper.adjusted(0, 0, -1, -1))
         p.setRenderHint(QPainter.Antialiasing)
@@ -1054,6 +1083,10 @@ class PageWidget(QWidget):
         color = QColor(self.win.colors.get(self.win.tool, "#000000"))
         if self.ink_overlay is not None:
             p.drawPixmap(0, 0, self.ink_overlay)
+        elif len(self.pts) > 1:
+            p.setPen(QPen(QColor(self.win.colors["pen"]), self.win.width * self.zoom,
+                          Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPolyline(self.pts)
         if self.moving and (self.moving[3] - self.moving[1]).manhattanLength() > 4:
             p.setPen(QPen(QColor("#25a89a"), 1, Qt.DashLine))
             p.setBrush(QColor(37, 168, 154, 30))
@@ -1536,6 +1569,10 @@ class Win(QMainWindow):
         self.width = saved_int(self.settings, "tools/pen/width", 2, 1, 20)
         self.font_size = saved_int(self.settings, "tools/text/font_size", FONT_SIZE, 6, 72)
         self.fit_mode = False
+        self._fit_width = None
+        self._resize_anchor = None
+        self._refit_timer = QTimer(self, singleShot=True)
+        self._refit_timer.timeout.connect(self.fit_width)
         self.hl_width = saved_int(self.settings, "tools/hl/width", DEFAULT_HIGHLIGHT_WIDTH, 1, 40)
         self.colors = {}
         for tool, default in DEFAULT_COLORS.items():
@@ -1649,6 +1686,7 @@ class Win(QMainWindow):
         self.addAction(self.find_act)
 
         self.scroll = QScrollArea(widgetResizable=True)
+        self.scroll.installEventFilter(self)
         self.background_pan = BackgroundPan(self)
         self.scroll.viewport().setAttribute(Qt.WA_AcceptTouchEvents)
         self.scroll.viewport().installEventFilter(self.background_pan)
@@ -1696,8 +1734,6 @@ class Win(QMainWindow):
         self.thumbs.viewport().installEventFilter(self)
         self.pages_dock = self.make_dock("페이지", self.thumbs, Qt.LeftDockWidgetArea, 190)
         self.properties_dock = self.make_dock("속성", self.make_properties(), Qt.RightDockWidgetArea, 220)
-        self.pages_dock.visibilityChanged.connect(self.schedule_refit)
-        self.properties_dock.visibilityChanged.connect(self.schedule_refit)
         for dock, title, icon in ((self.pages_dock, "페이지 목록", "layout"),
                                   (self.properties_dock, "속성 패널", "panel")):
             toggle = dock.toggleViewAction()
@@ -1914,7 +1950,7 @@ class Win(QMainWindow):
             return
         for pno, page in enumerate(self.doc):
             textpage = pymupdf.TextPage(page.get_displaylist(annots=0).get_textpage(pymupdf.TEXTFLAGS_SEARCH))
-            hits = textpage.search(query, quads=0)
+            hits = [rect * page.derotation_matrix for rect in textpage.search(query, quads=0)]
             self.pages[pno].search_hits = hits
             self.search_results.extend((pno, rect) for rect in hits)
         if not self.search_results:
@@ -1957,6 +1993,10 @@ class Win(QMainWindow):
                 return True
         if hasattr(self, "thumbs") and obj is self.thumbs.viewport() and kind == QEvent.Resize:
             self.schedule_thumbnail_refit()
+        if kind == QEvent.Resize and obj is self.scroll and self.fit_mode:
+            if self._resize_anchor is None and not self._restoring_page:
+                self._resize_anchor = self.capture_zoom_anchor(self.viewport_center())
+            self._refit_timer.start(0)
         if kind == QEvent.Wheel and e.modifiers() & Qt.ControlModifier:
             delta = e.angleDelta().y() or e.pixelDelta().y()
             if delta:
@@ -1995,8 +2035,8 @@ class Win(QMainWindow):
             self.cancel_zoom_preview()
         self.background_pan.cancel()
         self.cancel_page_interaction()
-        self._pinch_start_zoom = self.zoom
         self.start_zoom_preview(center)
+        self._pinch_start_zoom = self._preview_base_zoom
 
     def update_pinch(self, total_scale, center):
         if self._pinch_start_zoom is None:
@@ -2010,16 +2050,16 @@ class Win(QMainWindow):
     def start_zoom_preview(self, center):
         if self._preview_base_zoom is not None:
             return
-        self._preview_base_zoom = self.zoom
-        self._preview_target_zoom = self.zoom
         self._preview_anchor = self.capture_zoom_anchor(center)
+        self._preview_base_zoom = self.pages[self._preview_anchor[0]].zoom if self._preview_anchor else self.zoom
+        self._preview_target_zoom = self._preview_base_zoom
         self._preview_center = QPointF(center)
         self.zoom_preview.start(center)
 
     def update_zoom_preview(self, target_zoom, center):
         if self._preview_base_zoom is None:
             self.start_zoom_preview(center)
-        self._preview_target_zoom = max(0.3, min(5.0, target_zoom))
+        self._preview_target_zoom = self.manual_zoom(target_zoom, self._preview_base_zoom)
         self._preview_center = QPointF(center)
         self.zoom_preview.transform(self._preview_target_zoom / self._preview_base_zoom, center)
         self.zoom_act.setText(f"{self._preview_target_zoom * 100:.0f}%")
@@ -2085,7 +2125,7 @@ class Win(QMainWindow):
                 pno = pw.pno
                 break
         local = self.pages[pno].mapFromGlobal(global_pos)
-        return pno, QPointF(local.x() / self.zoom, local.y() / self.zoom)
+        return pno, QPointF(local) / self.pages[pno].zoom
 
     def restore_zoom_anchor(self, anchor_ref, viewport_pos):
         if anchor_ref is None or not self.pages:
@@ -2093,7 +2133,7 @@ class Win(QMainWindow):
         pno, pdf_pos = anchor_ref
         if not 0 <= pno < len(self.pages):
             return
-        point = QPointF(pdf_pos.x() * self.zoom, pdf_pos.y() * self.zoom).toPoint()
+        point = (pdf_pos * self.pages[pno].zoom).toPoint()
         viewport = self.scroll.viewport()
         current = viewport.mapFromGlobal(self.pages[pno].mapToGlobal(point))
         hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
@@ -2102,14 +2142,9 @@ class Win(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.schedule_refit()
         self.zoom_preview.setGeometry(self.scroll.viewport().rect())
         if self.scroll_page_indicator.isVisible():
             self.position_scroll_page_indicator()
-
-    def schedule_refit(self):
-        if self.fit_mode and self.pages:
-            QTimer.singleShot(0, lambda: self.fit_width() if self.fit_mode else None)
 
     # --- 문서 ---
     def drop_page_image(self, pno):
@@ -2146,6 +2181,10 @@ class Win(QMainWindow):
         self._page_image_cache.clear()
         self._page_image_cache_bytes = 0
         self._document_generation += 1
+        self.fit_mode = False
+        self._fit_width = None
+        self._resize_anchor = None
+        self._refit_timer.stop()
         self._restoring_page = True
         try:
             stored = int(QSettings("pdf-editor", "PdfEditor").value(page_settings_key(path), 0))
@@ -2156,12 +2195,12 @@ class Win(QMainWindow):
         box = QWidget()
         self.paint_canvas(box)
         lay = QVBoxLayout(box)
-        lay.setAlignment(Qt.AlignHCenter)
+        lay.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         lay.setSpacing(16)
         lay.setContentsMargins(16, 16, 16, 16)
         self.pages = [PageWidget(self, i) for i in range(len(self.doc))]
         for pw in self.pages:
-            lay.addWidget(pw)
+            lay.addWidget(pw, 0, Qt.AlignHCenter)
             self.register_zoom_input(pw)
         self.scroll.setWidget(box)
         self.background_pan.set_canvas(box)
@@ -2254,7 +2293,14 @@ class Win(QMainWindow):
 
     # --- 페이지 이동/목록 ---
     def current_page(self):
-        y = self.scroll.verticalScrollBar().value() + self.scroll.viewport().height() / 2
+        if not self.pages:
+            return -1
+        bar = self.scroll.verticalScrollBar()
+        if bar.value() == 0:
+            return 0
+        if bar.value() == bar.maximum():
+            return len(self.pages) - 1
+        y = bar.value() + self.scroll.viewport().height() / 2
         low, high = 0, len(self.pages)
         while low < high:
             middle = (low + high) // 2
@@ -2269,6 +2315,9 @@ class Win(QMainWindow):
             self.scroll_page_indicator.hide()
             return
         pno = self.current_page()
+        if self._preview_base_zoom is None:
+            self.zoom = self.pages[pno].zoom
+            self.zoom_act.setText(f"{self.zoom * 100:.0f}%")
         if self.page_spin.value() != pno + 1 or self.thumbs.currentRow() != pno:
             for w in (self.page_spin, self.thumbs):
                 w.blockSignals(True)
@@ -2308,16 +2357,17 @@ class Win(QMainWindow):
 
     def goto_page(self, pno):
         if 0 <= pno < len(self.pages):
-            self.scroll.verticalScrollBar().setValue(self.pages[pno].y() - 16)
+            page = self.pages[pno]
+            offset = max(16, (self.scroll.viewport().height() - page.height()) // 2)
+            self.scroll.verticalScrollBar().setValue(page.y() - offset)
 
     def update_thumb(self, pno):
         if pno < self.thumbs.count():
             width = self.thumbnail_width()
-            page = self.doc[pno]
-            height = math.ceil(width * page.rect.height / page.rect.width)
+            zoom, height = self.thumbnail_geometry(pno, width)
             item = self.thumbs.item(pno)
             dpr = self.thumbs.devicePixelRatioF()
-            image = self.pages[pno].render(width * dpr / page.rect.width)
+            image = self.pages[pno].render(zoom * dpr)
             image.setDevicePixelRatio(dpr)
             pixmap = QPixmap.fromImage(image)
             icon = QIcon()
@@ -2344,6 +2394,11 @@ class Win(QMainWindow):
     def thumbnail_width(self):
         return max(1, self.thumbs.viewport().width() - 2 * self.thumbs.spacing() - THUMB_ITEM_INSET)
 
+    def thumbnail_geometry(self, pno, width):
+        rect = self.pages[pno].page_size
+        zoom = min(width / rect.width, 3 * width / rect.height)
+        return zoom, math.ceil(zoom * rect.height)
+
     def schedule_thumbnail_refit(self):
         if self.doc and self.thumbs.count():
             self._thumbnail_timer.start()
@@ -2355,7 +2410,7 @@ class Win(QMainWindow):
         if width == self._thumbnail_width:
             return
         current = self.thumbs.currentItem()
-        heights = [math.ceil(width * page.rect.height / page.rect.width) for page in self.doc]
+        heights = [self.thumbnail_geometry(pno, width)[1] for pno in range(len(self.pages))]
         self._thumbnail_width = width
         self.thumbs.setIconSize(QSize(width, max(heights)))
         for pno in range(self.thumbs.count()):
@@ -2370,7 +2425,38 @@ class Win(QMainWindow):
             self.thumbs.scrollToItem(current)
 
     # --- 편집 ---
-    def set_zoom(self, z, fit=False, anchor=None, anchor_ref=None):
+    @staticmethod
+    def manual_zoom(target, base):
+        return max(min(0.3, base), min(max(5.0, base), target))
+
+    def page_zooms(self, fit_width, manual):
+        canvas = self.scroll.widget()
+        layout = canvas.layout()
+        margins = layout.contentsMargins()
+        shadow = self.theme["shadow"]
+        count = len(self.pages)
+        height_budget = (canvas.maximumHeight() - margins.top() - margins.bottom()
+                         - (count - 1) * layout.spacing() - count * shadow)
+        width_limit = canvas.maximumWidth() - margins.left() - margins.right() - shadow
+        zooms = []
+        heights = []
+        for pw in self.pages:
+            rect = pw.page_size
+            zoom = fit_width / rect.width if fit_width is not None else manual
+            zoom = min(zoom, width_limit / rect.width)
+            zooms.append(zoom)
+            heights.append(math.ceil(rect.height * zoom))
+        if sum(heights) <= height_budget:
+            return zooms
+        # Qt 위젯의 최대 높이에 닿으면 긴 페이지만 더 줄여 마지막 줄까지 스크롤한다.
+        share = height_budget // count
+        short = [height for height in heights if height <= share]
+        limit = max(1, (height_budget - sum(short)) // (count - len(short)) - 1)
+        return [min(zoom, limit / pw.page_size.height) for pw, zoom in zip(self.pages, zooms)]
+
+    def set_zoom(self, z, fit_width=None, anchor=None, anchor_ref=None):
+        self._refit_timer.stop()
+        self._resize_anchor = None
         if self._preview_base_zoom is not None:
             self.cancel_zoom_preview()
         pno = self._last_seen_page if self._restoring_page else self.current_page()
@@ -2381,10 +2467,16 @@ class Win(QMainWindow):
             anchor = self.viewport_center()
         if anchor_ref is None:
             anchor_ref = self.capture_zoom_anchor(anchor)
-        self.fit_mode = fit
-        self.zoom = max(0.3, min(5.0, z))
-        for pw in self.pages:
-            pw.invalidate(thumb=False, content=False)
+        base = self.pages[anchor_ref[0]].zoom if anchor_ref is not None else self.zoom
+        self.fit_mode = fit_width is not None
+        self._fit_width = fit_width
+        if not self.fit_mode:
+            self.zoom = self.manual_zoom(z, base)
+        if self.pages:
+            for pw, zoom in zip(self.pages, self.page_zooms(fit_width, self.zoom)):
+                pw.zoom = zoom
+                pw.invalidate(thumb=False, content=False)
+            self.zoom = self.pages[pno].zoom
         self.zoom_act.setText(f"{self.zoom * 100:.0f}%")
 
         def finish_zoom():
@@ -2397,13 +2489,29 @@ class Win(QMainWindow):
                 self.scroll_page_timer.stop()
                 self.scroll_page_indicator.hide()
             else:
-                self.restore_zoom_anchor(anchor_ref, anchor)
+                self.restore_zoom_anchor(anchor_ref, self.viewport_center() if self.fit_mode else anchor)
         # QScrollArea의 크기 조정과 페이지 레이아웃이 끝난 다음 위치를 복원한다.
         QTimer.singleShot(0, lambda: QTimer.singleShot(0, finish_zoom))
 
     def fit_width(self):
-        if self.pages:
-            self.set_zoom((self.scroll.viewport().width() - 48) / self.doc[0].rect.width, fit=True)
+        if not self.pages:
+            return
+        layout = self.scroll.widget().layout()
+        margins = layout.contentsMargins()
+        shadow = self.theme["shadow"]
+        available = self.scroll.maximumViewportSize()
+        width = max(1, available.width() - margins.left() - margins.right() - shadow)
+        height = margins.top() + margins.bottom() + layout.spacing() * (len(self.pages) - 1)
+        for pw in self.pages:
+            height += math.ceil(width * pw.page_size.height / pw.page_size.width) + shadow
+            if height > available.height():
+                width = max(1, width - self.scroll.verticalScrollBar().sizeHint().width())
+                break
+        if width != self._fit_width:
+            self.set_zoom(None, fit_width=width, anchor_ref=self._resize_anchor)
+        elif self._resize_anchor is not None:
+            self.restore_zoom_anchor(self._resize_anchor, self.viewport_center())
+            self._resize_anchor = None
 
     def set_tool(self, tool):
         if tool != self.tool:
